@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.*
+.envsk-*
+*.log
+Dockerfile
+.dockerignore
+render.yaml
+README.md

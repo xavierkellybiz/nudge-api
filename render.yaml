@@ -1,0 +1,17 @@
+# Render blueprint. If server/ is its own GitHub repo, Render auto-detects this.
+# Free plan sleeps after ~15 min idle (first request then takes ~50s). Upgrade to "starter" for always-on.
+services:
+  - type: web
+    name: nudge-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false        # paste in the Render dashboard (do NOT commit)
+      - key: FDC_API_KEY
+        sync: false        # optional; USDA food search (a free key, else DEMO_KEY)
+      - key: API_SECRET
+        sync: false        # pick any long random string; give it to me for the app .env
