@@ -257,10 +257,10 @@ function offCountry(c) {
 //   - search.openfoodfacts.org (search-a-licious) is fast and reliable but looser on relevance
 //     ("tesco hummus" -> peppers and salad), so it is the fallback rather than the default.
 //   - the v2 /api/v2/search endpoint ignores search_terms entirely and is unusable for text search.
-async function searchOpenFoodFacts(q, country) {
+async function searchOpenFoodFacts(q, country, page = 1) {
   const legacy = 'https://world.openfoodfacts.org/cgi/search.pl'
     + `?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1`
-    + `&page_size=30&fields=${OFF_FIELDS}`
+    + `&page_size=50&fields=${OFF_FIELDS}`
     + (country ? `&tagtype_0=countries&tag_contains_0=contains&tag_0=${encodeURIComponent(country)}` : '');
   for (let i = 0; i < 2; i++) {                      // one quick retry absorbs most 503s
     try {
@@ -274,7 +274,7 @@ async function searchOpenFoodFacts(q, country) {
   }
   try {
     const alt = `https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}`
-      + `&page_size=30&fields=${OFF_FIELDS}`;
+      + `&page_size=50&fields=${OFF_FIELDS}`;
     const r = await fetch(alt, { headers: OFF_UA });
     if (!r.ok) return [];
     const d = await r.json();
@@ -322,6 +322,12 @@ function scoreFood(f, q, country) {
   // else: without it, category bonuses float items with no textual relevance at all to the top.
   const cover = words.filter((w) => hay.includes(w)).length / words.length;
   if (cover < 0.5) return -1000;               // matches less than half the query, not a real result
+  // A one-word query names a food, not a brand. Without this, searching "chicken" returns CHUNK
+  // LIGHT TUNA because its brand is "Chicken of the Sea".
+  if (words.length === 1 && !name.includes(query)) return -1000;
+  // The NAME must carry at least one query word. Matching on brand alone let "tesco hummus" return
+  // "[Tesco] Avocado" -- right shop, entirely the wrong food.
+  if (!words.some((w) => name.includes(w))) return -1000;
   s += cover * 40;
 
   // Exact match matters but must NOT dominate. USDA branded rows are literally named "BANANA" and
@@ -337,7 +343,8 @@ function scoreFood(f, q, country) {
 
   // Did the user actually name a brand? Only count a brand hit on a word the NAME doesn't already
   // contain, otherwise "HAPPY HUMMUS" scores as if it were the retailer that was asked for.
-  const brandAsked = brand && words.some((w) => w.length > 2 && brand.includes(w) && !name.includes(w));
+  const brandAsked = words.length > 1 && brand
+    && words.some((w) => w.length > 2 && brand.includes(w) && !name.includes(w));
   if (brandAsked) s += 60;                       // naming a brand is a strong intent signal
   else if (brand) s -= local ? 12 : 50;          // unasked brand: mild if buyable, heavy if foreign
   else s += 30;                                  // generic whole food
@@ -367,14 +374,18 @@ const dedupeKey = (f) => `${f.brand.toLowerCase()}|${f.name.toLowerCase().replac
 app.get('/food-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   const country = offCountry(req.query.country);   // accepts 'US' or 'united-states'
-  if (!q) return res.json({ foods: [] });
+  // Paging. We over-fetch from both sources, rank the whole pool, then slice, so page 2 is a
+  // genuine continuation of one ranking rather than a second, separately-ranked query.
+  const page = Math.max(1, Math.min(5, parseInt(req.query.page, 10) || 1));
+  const PER_PAGE = 25;
+  if (!q) return res.json({ foods: [], page: 1, hasMore: false });
 
   const fdc = (async () => {
     const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${FDC_API_KEY}`
       // Survey (FNDDS) is USDA's "foods as actually eaten" set: composed dishes like "Burrito, NFS"
       // and "Mexican pizza". The other three cover raw ingredients and supermarket packages, so
       // without it a search for a real meal returns only its parts or a frozen version of it.
-      + `&query=${encodeURIComponent(q)}&pageSize=40`
+      + `&query=${encodeURIComponent(q)}&pageSize=60`
       + `&dataType=${encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS),Branded')}`;
     // USDA's edge randomly returns nginx 400s, measured at roughly 1 in 3 on identical URLs. It is
     // not the key, the query or the payload size (limiting nutrients changes nothing), so the only
@@ -396,7 +407,7 @@ app.get('/food-search', async (req, res) => {
 
   // Hit both in parallel; one source failing (FDC rate limits hard on DEMO_KEY) must not take out
   // the whole search.
-  const [a, b] = await Promise.allSettled([fdc, searchOpenFoodFacts(q, country)]);
+  const [a, b] = await Promise.allSettled([fdc, searchOpenFoodFacts(q, country, page)]);
   const all = [...(a.status === 'fulfilled' ? a.value : []),
                ...(b.status === 'fulfilled' ? b.value : [])].filter((f) => f && f.calories > 0);
 
@@ -407,12 +418,16 @@ app.get('/food-search', async (req, res) => {
   }
 
   const seen = new Set();
-  const foods = all
-    .sort((x, y) => scoreFood(y, q, country) - scoreFood(x, q, country))
-    .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; })
-    .slice(0, 25);
+  const ranked = all
+    .map((f) => ({ f, s: scoreFood(f, q, country) }))
+    .filter((x) => x.s > -1000)                    // drop anything that failed the coverage gate
+    .sort((x, y) => y.s - x.s)
+    .map((x) => x.f)
+    .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; });
 
-  res.json({ foods, sources: { fdc: a.status, off: b.status } });
+  const start = (page - 1) * PER_PAGE;
+  const foods = ranked.slice(start, start + PER_PAGE);
+  res.json({ foods, page, hasMore: ranked.length > start + PER_PAGE, sources: { fdc: a.status, off: b.status } });
 });
 
 // ── Coach chat (real LLM, grounded in the user's profile + chosen tone) ───────
