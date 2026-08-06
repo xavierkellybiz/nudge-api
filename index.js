@@ -233,6 +233,22 @@ function normalizeFdcFood(food) {
 const OFF_FIELDS = 'product_name,brands,nutriments,serving_size,countries_tags';
 const OFF_UA = { 'User-Agent': 'Nudge/1.0 (nutrition app)' };
 
+// The app stores ISO-2 country codes (see src/data/options.ts) but OFF filters on slugs, so
+// `country=us` matched nothing until this mapping existed. Accept either form.
+const OFF_COUNTRY = {
+  US: 'united-states', GB: 'united-kingdom', AU: 'australia',
+  CA: 'canada', NZ: 'new-zealand', IE: 'ireland',
+};
+const HOME_OF_FDC = 'united-states';   // USDA *is* the US packaged-goods database
+
+function offCountry(c) {
+  if (!c) return '';
+  const up = String(c).trim().toUpperCase();
+  if (OFF_COUNTRY[up]) return OFF_COUNTRY[up];
+  if (up === 'OTHER') return '';
+  return String(c).trim().toLowerCase().replace(/\s+/g, '-');
+}
+
 // Two OFF endpoints, deliberately in this order. Measured against real queries:
 //   - legacy cgi/search.pl has much the best relevance ("tesco hummus" -> actual hummus) but 503s
 //     intermittently under load.
@@ -317,9 +333,16 @@ function scoreFood(f, q, country) {
   else if (brand) s -= 30;             // no brand asked -> a branded item is probably not what they meant
   else s += 22;                        // generic whole food
 
-  // OFF results are country-filtered upstream, so when we know the user's country they are far more
-  // likely to be a product they can actually buy than a US-only branded entry.
-  if (country && f.source === 'off') s += 12;
+  // Source preference follows the market. In the US, USDA's ~450k branded foods ARE the national
+  // packaged-goods database and beat OFF's patchier US coverage, so OFF gets no leg up. Everywhere
+  // else USDA's branded rows are products you cannot buy, and OFF (country-filtered upstream)
+  // carries the real coverage, so it needs a firm push to outrank the flood of US entries.
+  if (country && country !== HOME_OF_FDC) {
+    if (f.source === 'off') s += 30;
+    else if (f.brand) s -= 15;         // US-only branded item shown to a non-US user
+  } else if (country === HOME_OF_FDC && f.source === 'fdc') {
+    s += 8;
+  }
 
   s -= Math.min(20, name.length / 6);          // prefer concise names over long branded strings
   if (f.protein || f.carbs || f.fats) s += 5;  // complete macros are more useful
@@ -330,7 +353,7 @@ const dedupeKey = (f) => `${f.brand.toLowerCase()}|${f.name.toLowerCase().replac
 
 app.get('/food-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
-  const country = String(req.query.country || '').trim().toLowerCase();
+  const country = offCountry(req.query.country);   // accepts 'US' or 'united-states'
   if (!q) return res.json({ foods: [] });
 
   const fdc = (async () => {
