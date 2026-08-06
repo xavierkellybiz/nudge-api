@@ -219,6 +219,8 @@ function normalizeFdcFood(food) {
   return {
     name: name.length > 60 ? name.slice(0, 60) : name,
     brand,
+    // Foundation / SR Legacy are USDA's curated generic foods; Branded is packaged products.
+    curated: /Foundation|SR Legacy/i.test(String(food.dataType || '')),
     serving,
     calories: Math.round(fdcNutrient(food, 1008)),   // Energy (kcal)
     protein: Math.round(fdcNutrient(food, 1003)),    // Protein
@@ -315,34 +317,39 @@ function scoreFood(f, q, country) {
   const words = query.split(/\s+/).filter(Boolean);
   let s = 0;
 
-  // Exact wins decisively: without a big gap, "Banana muffin" (prefix match, unbranded) outscores
-  // an actual "Banana" once the other bonuses stack up.
-  if (name === query) s += 140;
+  // How much of what they typed does this actually contain? Checked across brand AND name so
+  // "tesco hummus" and "greggs sausage roll" find the retailer's own product. This gates everything
+  // else: without it, category bonuses float items with no textual relevance at all to the top.
+  const cover = words.filter((w) => hay.includes(w)).length / words.length;
+  if (cover < 0.5) return -1000;               // matches less than half the query, not a real result
+  s += cover * 40;
+
+  // Exact match matters but must NOT dominate. USDA branded rows are literally named "BANANA" and
+  // "CHICKEN BREAST", so an overweighted exact bonus floats a peanut-butter product above the fruit.
+  if (name === query) s += 70;
   else if (name.startsWith(query)) s += 60;
   else if (new RegExp(`\\b${escRe(query)}`).test(name)) s += 35;
   else if (name.includes(query)) s += 15;
 
-  // Match across brand AND name, so "tesco hummus" and "greggs sausage roll" find the retailer's
-  // own product rather than a generic entry that happens to share one word.
-  if (words.every((w) => hay.includes(w))) s += 30;
+  // Is this a product the user can actually buy? OFF is country-filtered upstream, so outside the
+  // US only OFF rows are local; inside the US both sources are.
+  const local = !country || country === HOME_OF_FDC || f.source === 'off';
 
   // Did the user actually name a brand? Only count a brand hit on a word the NAME doesn't already
   // contain, otherwise "HAPPY HUMMUS" scores as if it were the retailer that was asked for.
   const brandAsked = brand && words.some((w) => w.length > 2 && brand.includes(w) && !name.includes(w));
-  if (brandAsked) s += 45;             // "tesco hummus" -> Tesco's own product
-  else if (brand) s -= 30;             // no brand asked -> a branded item is probably not what they meant
-  else s += 22;                        // generic whole food
+  if (brandAsked) s += 60;                       // naming a brand is a strong intent signal
+  else if (brand) s -= local ? 12 : 50;          // unasked brand: mild if buyable, heavy if foreign
+  else s += 30;                                  // generic whole food
 
-  // Source preference follows the market. In the US, USDA's ~450k branded foods ARE the national
-  // packaged-goods database and beat OFF's patchier US coverage, so OFF gets no leg up. Everywhere
-  // else USDA's branded rows are products you cannot buy, and OFF (country-filtered upstream)
-  // carries the real coverage, so it needs a firm push to outrank the flood of US entries.
-  if (country && country !== HOME_OF_FDC) {
-    if (f.source === 'off') s += 30;
-    else if (f.brand) s -= 15;         // US-only branded item shown to a non-US user
-  } else if (country === HOME_OF_FDC && f.source === 'fdc') {
-    s += 8;
-  }
+  // The strongest signal available for a generic query, and the one that was missing: USDA marks
+  // its curated generic foods as Foundation / SR Legacy. Those are the canonical entries ("Bananas,
+  // raw"), whereas Branded rows are packaged goods whose terse names ("BANANA") exact-match a plain
+  // query while being something else entirely, e.g. a 467 kcal yogurt-covered snack.
+  if (!brandAsked && f.curated) s += 45;
+
+  if (country === HOME_OF_FDC && f.source === 'fdc') s += 8;
+  else if (country && country !== HOME_OF_FDC && f.source === 'off') s += 30;
 
   s -= Math.min(20, name.length / 6);          // prefer concise names over long branded strings
   if (f.protein || f.carbs || f.fats) s += 5;  // complete macros are more useful
