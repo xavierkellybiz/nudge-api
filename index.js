@@ -220,7 +220,7 @@ function normalizeFdcFood(food) {
     name: name.length > 60 ? name.slice(0, 60) : name,
     brand,
     // Foundation / SR Legacy are USDA's curated generic foods; Branded is packaged products.
-    curated: /Foundation|SR Legacy/i.test(String(food.dataType || '')),
+    curated: /Foundation|SR Legacy|Survey/i.test(String(food.dataType || '')),
     serving,
     calories: Math.round(fdcNutrient(food, 1008)),   // Energy (kcal)
     protein: Math.round(fdcNutrient(food, 1003)),    // Protein
@@ -348,6 +348,12 @@ function scoreFood(f, q, country) {
   // query while being something else entirely, e.g. a 467 kcal yogurt-covered snack.
   if (!brandAsked && f.curated) s += 45;
 
+  // USDA marks its canonical generic entries "NFS" (Not Further Specified) or "plain". Without this
+  // a bare "greek yogurt" returns "Yogurt, Greek, with oats" over plain Greek yogurt, since a
+  // flavoured variant matches the query just as well.
+  if (!brandAsked && /\bNFS\b/i.test(f.name)) s += 18;
+  else if (!brandAsked && /\bplain\b/i.test(f.name)) s += 14;
+
   if (country === HOME_OF_FDC && f.source === 'fdc') s += 8;
   else if (country && country !== HOME_OF_FDC && f.source === 'off') s += 30;
 
@@ -365,12 +371,27 @@ app.get('/food-search', async (req, res) => {
 
   const fdc = (async () => {
     const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${FDC_API_KEY}`
-      + `&query=${encodeURIComponent(q)}&pageSize=25&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`fdc ${r.status}`);
-    const data = await r.json();
-    return (Array.isArray(data.foods) ? data.foods : [])
-      .map(normalizeFdcFood).filter(Boolean).map((f) => ({ ...f, source: 'fdc' }));
+      // Survey (FNDDS) is USDA's "foods as actually eaten" set: composed dishes like "Burrito, NFS"
+      // and "Mexican pizza". The other three cover raw ingredients and supermarket packages, so
+      // without it a search for a real meal returns only its parts or a frozen version of it.
+      + `&query=${encodeURIComponent(q)}&pageSize=40`
+      + `&dataType=${encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS),Branded')}`;
+    // USDA's edge randomly returns nginx 400s, measured at roughly 1 in 3 on identical URLs. It is
+    // not the key, the query or the payload size (limiting nutrients changes nothing), so the only
+    // defence is retrying. Without this the whole US catalogue silently vanished from a third of
+    // searches and results fell back to Open Food Facts alone.
+    let last = 0;
+    for (let i = 0; i < 3; i++) {
+      const r = await fetch(url);
+      if (r.ok) {
+        const data = await r.json();
+        return (Array.isArray(data.foods) ? data.foods : [])
+          .map(normalizeFdcFood).filter(Boolean).map((f) => ({ ...f, source: 'fdc' }));
+      }
+      last = r.status;
+      await new Promise((res) => setTimeout(res, 250 * (i + 1)));
+    }
+    throw new Error(`fdc ${last}`);
   })();
 
   // Hit both in parallel; one source failing (FDC rate limits hard on DEMO_KEY) must not take out
