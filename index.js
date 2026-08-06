@@ -226,23 +226,142 @@ function normalizeFdcFood(food) {
     fats: Math.round(fdcNutrient(food, 1004)),       // Total lipid (fat)
   };
 }
+// ── Open Food Facts (text search) ────────────────────────────────────────────
+// USDA's branded catalogue is US packaged goods, which is close to useless for UK shoppers looking
+// for Tesco / Sainsbury's / Greggs. OFF has ~3M products with strong UK+EU coverage and needs no
+// key. We already used it for barcode lookups; this puts it behind text search too.
+const OFF_FIELDS = 'product_name,brands,nutriments,serving_size,countries_tags';
+const OFF_UA = { 'User-Agent': 'Nudge/1.0 (nutrition app)' };
+
+// Two OFF endpoints, deliberately in this order. Measured against real queries:
+//   - legacy cgi/search.pl has much the best relevance ("tesco hummus" -> actual hummus) but 503s
+//     intermittently under load.
+//   - search.openfoodfacts.org (search-a-licious) is fast and reliable but looser on relevance
+//     ("tesco hummus" -> peppers and salad), so it is the fallback rather than the default.
+//   - the v2 /api/v2/search endpoint ignores search_terms entirely and is unusable for text search.
+async function searchOpenFoodFacts(q, country) {
+  const legacy = 'https://world.openfoodfacts.org/cgi/search.pl'
+    + `?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1`
+    + `&page_size=30&fields=${OFF_FIELDS}`
+    + (country ? `&tagtype_0=countries&tag_contains_0=contains&tag_0=${encodeURIComponent(country)}` : '');
+  for (let i = 0; i < 2; i++) {                      // one quick retry absorbs most 503s
+    try {
+      const r = await fetch(legacy, { headers: OFF_UA });
+      if (r.ok) {
+        const d = await r.json();
+        const out = (Array.isArray(d.products) ? d.products : []).map(normalizeOffFood).filter(Boolean);
+        if (out.length) return out;
+      }
+    } catch { /* fall through */ }
+  }
+  try {
+    const alt = `https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}`
+      + `&page_size=30&fields=${OFF_FIELDS}`;
+    const r = await fetch(alt, { headers: OFF_UA });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (Array.isArray(d.hits) ? d.hits : []).map(normalizeOffFood).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeOffFood(p) {
+  const name = String(p.product_name || '').trim().replace(/\s+/g, ' ');
+  if (!name) return null;
+  const n = p.nutriments || {};
+  // OFF gives per-100g under `_100g`. Prefer kcal; fall back to converting kJ.
+  const kcal = Number(n['energy-kcal_100g']) || (Number(n.energy_100g) ? Number(n.energy_100g) / 4.184 : 0);
+  if (!kcal || !isFinite(kcal)) return null;
+  // cgi returns brands as a comma string, search-a-licious as an array.
+  const brand = (Array.isArray(p.brands) ? p.brands[0] : String(p.brands || '').split(',')[0] || '').trim();
+  return {
+    name: name.length > 60 ? name.slice(0, 60) : name,
+    brand,
+    serving: String(p.serving_size || '').trim() || '100 g',
+    calories: Math.round(kcal),
+    protein: Math.round(Number(n.proteins_100g) || 0),
+    carbs: Math.round(Number(n.carbohydrates_100g) || 0),
+    fats: Math.round(Number(n.fat_100g) || 0),
+    source: 'off',
+  };
+}
+
+// USDA returns results in an order that buries the obvious answer: "chicken" puts obscure entries
+// above "Chicken, breast". Score by how well the name actually matches what was typed.
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function scoreFood(f, q, country) {
+  const query = q.toLowerCase().trim();
+  const name = f.name.toLowerCase();
+  const brand = (f.brand || '').toLowerCase();
+  const hay = `${brand} ${name}`.trim();
+  const words = query.split(/\s+/).filter(Boolean);
+  let s = 0;
+
+  // Exact wins decisively: without a big gap, "Banana muffin" (prefix match, unbranded) outscores
+  // an actual "Banana" once the other bonuses stack up.
+  if (name === query) s += 140;
+  else if (name.startsWith(query)) s += 60;
+  else if (new RegExp(`\\b${escRe(query)}`).test(name)) s += 35;
+  else if (name.includes(query)) s += 15;
+
+  // Match across brand AND name, so "tesco hummus" and "greggs sausage roll" find the retailer's
+  // own product rather than a generic entry that happens to share one word.
+  if (words.every((w) => hay.includes(w))) s += 30;
+
+  // Did the user actually name a brand? Only count a brand hit on a word the NAME doesn't already
+  // contain, otherwise "HAPPY HUMMUS" scores as if it were the retailer that was asked for.
+  const brandAsked = brand && words.some((w) => w.length > 2 && brand.includes(w) && !name.includes(w));
+  if (brandAsked) s += 45;             // "tesco hummus" -> Tesco's own product
+  else if (brand) s -= 30;             // no brand asked -> a branded item is probably not what they meant
+  else s += 22;                        // generic whole food
+
+  // OFF results are country-filtered upstream, so when we know the user's country they are far more
+  // likely to be a product they can actually buy than a US-only branded entry.
+  if (country && f.source === 'off') s += 12;
+
+  s -= Math.min(20, name.length / 6);          // prefer concise names over long branded strings
+  if (f.protein || f.carbs || f.fats) s += 5;  // complete macros are more useful
+  return s;
+}
+
+const dedupeKey = (f) => `${f.brand.toLowerCase()}|${f.name.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+
 app.get('/food-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
+  const country = String(req.query.country || '').trim().toLowerCase();
   if (!q) return res.json({ foods: [] });
-  try {
+
+  const fdc = (async () => {
     const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${FDC_API_KEY}`
       + `&query=${encodeURIComponent(q)}&pageSize=25&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`;
     const r = await fetch(url);
-    if (!r.ok) return res.status(502).json({ error: `food search failed (${r.status})` });
+    if (!r.ok) throw new Error(`fdc ${r.status}`);
     const data = await r.json();
-    const foods = (Array.isArray(data.foods) ? data.foods : [])
-      .map(normalizeFdcFood)
-      .filter((f) => f && f.calories > 0)
-      .slice(0, 20);
-    res.json({ foods });
-  } catch (e) {
-    res.status(500).json({ error: 'food search error' });
+    return (Array.isArray(data.foods) ? data.foods : [])
+      .map(normalizeFdcFood).filter(Boolean).map((f) => ({ ...f, source: 'fdc' }));
+  })();
+
+  // Hit both in parallel; one source failing (FDC rate limits hard on DEMO_KEY) must not take out
+  // the whole search.
+  const [a, b] = await Promise.allSettled([fdc, searchOpenFoodFacts(q, country)]);
+  const all = [...(a.status === 'fulfilled' ? a.value : []),
+               ...(b.status === 'fulfilled' ? b.value : [])].filter((f) => f && f.calories > 0);
+
+  if (!all.length) {
+    const why = [a, b].filter((x) => x.status === 'rejected').map((x) => String(x.reason)).join('; ');
+    if (why) return res.status(502).json({ error: `food search failed (${why})`, foods: [] });
+    return res.json({ foods: [] });
   }
+
+  const seen = new Set();
+  const foods = all
+    .sort((x, y) => scoreFood(y, q, country) - scoreFood(x, q, country))
+    .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; })
+    .slice(0, 25);
+
+  res.json({ foods, sources: { fdc: a.status, off: b.status } });
 });
 
 // ── Coach chat (real LLM, grounded in the user's profile + chosen tone) ───────
@@ -334,6 +453,73 @@ app.post('/coach', async (req, res) => {
     res.json({ reply });
   } catch (e) {
     res.status(500).json({ error: 'coach error' });
+  }
+});
+
+// ── Exercise (free text → structured MET estimate) ───────────────────────────
+// The model's ONLY job is to identify the activity, its MET value, and the duration. The kcal maths
+// is done here from the person's real body weight, so the number is reproducible and never invented.
+// Net burn = (MET - 1) x kg x hours: subtracting 1 MET removes the resting energy they'd have spent
+// anyway, which is what "calories burned by exercising" honestly means.
+const EXERCISE_SYSTEM = [
+  'You convert a description of a workout into structured data. Return JSON only.',
+  '',
+  'Fields:',
+  '- activity: short name of what they did (2 to 4 words, lowercase).',
+  '- met: the metabolic equivalent for that activity AT the intensity described, from the Compendium of Physical Activities.',
+  '- minutes: total minutes of actual activity. If they gave no duration, infer the most typical duration for that activity and set assumedDuration true.',
+  '- assumedDuration: true only if you had to guess the duration.',
+  '',
+  'MET reference (interpolate sensibly for anything not listed):',
+  'walking slow 2mph 2.8 | walking brisk 3.5mph 4.3 | walking uphill/stairs 8.0',
+  'jogging 5mph 8.3 | running 6mph 9.8 | running 7.5mph 11.5 | running 10mph 14.5 | sprinting 19.0',
+  'cycling leisure 4.0 | cycling moderate 8.0 | cycling vigorous 12.0 | spin class 8.5',
+  'swimming leisure 6.0 | swimming laps vigorous 9.8',
+  'weight lifting light 3.0 | weight lifting moderate 5.0 | weight lifting vigorous/to failure 6.0',
+  'circuit training 7.5 | HIIT 8.0 | crossfit 5.0 | rowing machine moderate 7.0 | elliptical 5.0',
+  'yoga 2.5 | pilates 3.0 | stretching 2.3 | dancing 5.0 | hiking 6.0',
+  'soccer 7.0 | basketball 6.5 | tennis singles 8.0 | boxing bag work 7.5 | martial arts 10.3',
+  'housework 3.0 | gardening 3.8 | playing with kids 4.0',
+  '',
+  'Rules: pick the MET that matches the intensity words they used (easy/light lowers it, hard/intense/failure raises it).',
+  'Never exceed 23. If the text is not exercise at all, set met 0 and minutes 0.',
+].join('\n');
+
+app.post('/exercise', async (req, res) => {
+  if (keyMissing(res)) return;
+  try {
+    const { text, profile } = req.body || {};
+    if (!text || !String(text).trim()) return res.status(400).json({ error: 'no text' });
+    const kg = Number(profile?.currentWeightKg) > 0 ? Number(profile.currentWeightKg) : 70;
+
+    const r = await openaiChatWithRetry({
+      model: COACH_MODEL,
+      temperature: 0,
+      max_tokens: 160,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: EXERCISE_SYSTEM },
+        { role: 'user', content: String(text).slice(0, 500) },
+      ],
+    });
+    if (!r.ok) return res.status(502).json({ error: `exercise failed (${r.status})` });
+    const data = await r.json();
+
+    let parsed = {};
+    try { parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{}'); } catch { parsed = {}; }
+    const met = Math.max(0, Math.min(23, Number(parsed.met) || 0));
+    const minutes = Math.max(0, Math.min(600, Math.round(Number(parsed.minutes) || 0)));
+    // Net of resting energy, and never negative for sub-resting "activities" like stretching.
+    const calories = Math.max(0, Math.round(Math.max(0, met - 1) * kg * (minutes / 60)));
+
+    res.json({
+      activity: String(parsed.activity || '').slice(0, 60) || 'workout',
+      met, minutes, calories,
+      assumedDuration: !!parsed.assumedDuration,
+      basedOnKg: kg,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'exercise error' });
   }
 });
 
