@@ -172,8 +172,23 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
 app.post('/vision', async (req, res) => {
   if (keyMissing(res)) return;
   try {
-    const { base64, mime } = req.body || {};
-    if (!base64) return res.status(400).json({ error: 'no image (base64)' });
+    const { base64, mime, correction, previous } = req.body || {};
+    // A correction ("that bread is a beef patty") may arrive without the photo — an older meal can
+    // still be re-estimated from the previous analysis alone.
+    if (!base64 && !correction) return res.status(400).json({ error: 'no image (base64)' });
+    const userText = correction
+      ? [
+          'Analyse this meal. Identify every visible food item separately, then return ONLY the JSON object.',
+          '',
+          'The user says a previous analysis was WRONG. Their correction:',
+          `"${String(correction).trim()}"`,
+          previous ? `\nThe analysis to correct:\n${JSON.stringify(previous)}` : '',
+          '',
+          'Apply the correction and re-estimate. Treat the user as the authority on WHAT the food is —',
+          "if they rename an item, replace it and recalculate that item's calories and macros from scratch.",
+          'Keep everything they did not mention.',
+        ].join('\n')
+      : 'Analyse this meal photo. Identify every visible food item separately, then return ONLY the JSON object.';
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -185,8 +200,8 @@ app.post('/vision', async (req, res) => {
         messages: [
           { role: 'system', content: VISION_SYSTEM },
           { role: 'user', content: [
-            { type: 'text', text: 'Analyse this meal photo. Identify every visible food item separately, then return ONLY the JSON object.' },
-            { type: 'image_url', image_url: { url: `data:${mime || 'image/jpeg'};base64,${base64}`, detail: 'high' } },
+            { type: 'text', text: userText },
+            ...(base64 ? [{ type: 'image_url', image_url: { url: `data:${mime || 'image/jpeg'};base64,${base64}`, detail: 'high' } }] : []),
           ] },
         ],
       }),
