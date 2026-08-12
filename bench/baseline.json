@@ -1,0 +1,460 @@
+{
+  "chicken breast": {
+    "top": [
+      {
+        "label": "Chicken breast, NS as to cooking method, skin eaten",
+        "calories": 228,
+        "serving": "1 breast (130 g)"
+      },
+      {
+        "label": "Chicken breast, NS as to cooking method, skin not eaten",
+        "calories": 173,
+        "serving": "1 breast (120 g)"
+      },
+      {
+        "label": "Chicken breast, rotisserie, skin not eaten",
+        "calories": 173,
+        "serving": "1 breast (120 g)"
+      }
+    ]
+  },
+  "banana": {
+    "top": [
+      {
+        "label": "Banana, raw",
+        "calories": 122,
+        "serving": "1 banana (126 g)"
+      },
+      {
+        "label": "Bananas, raw",
+        "calories": 200,
+        "serving": "cup, mashed (225 g)"
+      },
+      {
+        "label": "Bananas, overripe, raw",
+        "calories": 94,
+        "serving": "Peeled (110 g)"
+      }
+    ]
+  },
+  "rice": {
+    "top": [
+      {
+        "label": "Rice, cooked, NFS",
+        "calories": 152,
+        "serving": "1 serving (118 g)"
+      },
+      {
+        "label": "Rice, fried, NFS",
+        "calories": 345,
+        "serving": "1 cup (198 g)"
+      },
+      {
+        "label": "Rice dressing",
+        "calories": 138,
+        "serving": "1 serving (125 g)"
+      }
+    ]
+  },
+  "egg": {
+    "top": [
+      {
+        "label": "Egg, whole, raw, fresh",
+        "calories": 72,
+        "serving": "large (50 g)"
+      },
+      {
+        "label": "Egg, whole, raw",
+        "calories": 72,
+        "serving": "1 egg (50 g)"
+      },
+      {
+        "label": "Egg, white, raw, fresh",
+        "calories": 17,
+        "serving": "large (33 g)"
+      }
+    ]
+  },
+  "salmon": {
+    "top": [
+      {
+        "label": "Fish, salmon, NFS",
+        "calories": 384,
+        "serving": "1 small/regular fillet (140 g)"
+      },
+      {
+        "label": "Lomi salmon",
+        "calories": 70,
+        "serving": "1 serving (117 g)"
+      },
+      {
+        "label": "Stewed salmon, Puerto Rican style",
+        "calories": 155,
+        "serving": "1 serving (106 g)"
+      }
+    ]
+  },
+  "broccoli": {
+    "top": [
+      {
+        "label": "Broccoli, NS as to form, cooked",
+        "calories": 50,
+        "serving": "1 serving (80 g)"
+      },
+      {
+        "label": "Broccoli, fresh, cooked, fat added, NS as to fat type",
+        "calories": 50,
+        "serving": "1 serving (80 g)"
+      },
+      {
+        "label": "Broccoli, frozen, cooked, fat added, NS as to fat type",
+        "calories": 48,
+        "serving": "1 serving (95 g)"
+      }
+    ]
+  },
+  "porridge oats": {
+    "top": [
+      {
+        "label": "[QUAKER] PORRIDGE OATS",
+        "calories": 150,
+        "serving": "1 serving (40 g)"
+      },
+      {
+        "label": "[THE GROWER'S HARVEST] PORRIDGE OATS",
+        "calories": 90,
+        "serving": "1 scoop (24 g)"
+      },
+      {
+        "label": "[Lidl] Porridge Oats",
+        "calories": 147,
+        "serving": "1 serving (40 g)"
+      }
+    ]
+  },
+  "greek yogurt": {
+    "top": [
+      {
+        "label": "Yogurt, Greek, NS as to type of milk, plain",
+        "calories": 101,
+        "serving": "1 container, NFS (150 g)"
+      },
+      {
+        "label": "Yogurt, Greek, NS as to type of milk, flavors other than fru",
+        "calories": 122,
+        "serving": "1 container, NFS (150 g)"
+      },
+      {
+        "label": "Yogurt, Greek, NS as to type of milk or flavor",
+        "calories": 137,
+        "serving": "1 container, NFS (150 g)"
+      }
+    ]
+  },
+  "beef mince": {
+    "top": [
+      {
+        "label": "Beef, NFS",
+        "calories": 139,
+        "serving": "1 serving (60 g)"
+      },
+      {
+        "label": "[Sainsbury's] BEEF MINCE",
+        "calories": 168,
+        "serving": "1 serving (100 g)"
+      },
+      {
+        "label": "[Simply] Beef Mince",
+        "calories": 287,
+        "serving": "100 g"
+      }
+    ]
+  },
+  "milk": {
+    "top": [
+      {
+        "label": "Milk, NFS",
+        "calories": 127,
+        "serving": "1 individual school container (244 g)"
+      },
+      {
+        "label": "Almond milk, NFS",
+        "calories": 49,
+        "serving": "1 cup (244 g)"
+      },
+      {
+        "label": "Milk, malted",
+        "calories": 169,
+        "serving": "1 cup (256 g)"
+      }
+    ]
+  },
+  "bread": {
+    "top": [
+      {
+        "label": "Bread, white",
+        "calories": 75,
+        "serving": "1 medium or regular slice (28 g)"
+      },
+      {
+        "label": "Bread, naan",
+        "calories": 137,
+        "serving": "1 piece (1/4 of 10\" dia) (44 g)"
+      },
+      {
+        "label": "Bread, zucchini",
+        "calories": 122,
+        "serving": "1 slice (40 g)"
+      }
+    ]
+  },
+  "pasta": {
+    "top": [
+      {
+        "label": "Pasta, fresh-refrigerated, plain, as purchased",
+        "calories": 369,
+        "serving": "oz (128 g)"
+      },
+      {
+        "label": "Pasta, fresh-refrigerated, plain, cooked",
+        "calories": 168,
+        "serving": "oz (128 g)"
+      },
+      {
+        "label": "Pasta, cooked",
+        "calories": 220,
+        "serving": "1 cup, cooked (140 g)"
+      }
+    ]
+  },
+  "apple": {
+    "top": [
+      {
+        "label": "Apple, raw",
+        "calories": 122,
+        "serving": "1 medium (200 g)"
+      },
+      {
+        "label": "Apples, raw, without skin",
+        "calories": 53,
+        "serving": "cup slices (110 g)"
+      },
+      {
+        "label": "Apples, raw, golden delicious, with skin",
+        "calories": 62,
+        "serving": "cup, sliced (109 g)"
+      }
+    ]
+  },
+  "avocado": {
+    "top": [
+      {
+        "label": "Avocado, raw",
+        "calories": 48,
+        "serving": "1 serving (30 g)"
+      },
+      {
+        "label": "Avocados, raw, California",
+        "calories": 167,
+        "serving": "100 g"
+      },
+      {
+        "label": "Avocados, raw, Florida",
+        "calories": 276,
+        "serving": "cup, pureed (230 g)"
+      }
+    ]
+  },
+  "tuna": {
+    "top": [
+      {
+        "label": "Fish, tuna, NFS",
+        "calories": 77,
+        "serving": "1 small/regular fillet (90 g)"
+      },
+      {
+        "label": "Macaroni or noodles with cheese and tuna",
+        "calories": 377,
+        "serving": "1 cup (230 g)"
+      },
+      {
+        "label": "Macaroni with tuna, Puerto Rican style",
+        "calories": 331,
+        "serving": "1 cup (225 g)"
+      }
+    ]
+  },
+  "sweet potato": {
+    "top": [
+      {
+        "label": "Sweet potato, NFS",
+        "calories": 115,
+        "serving": "1 serving (100 g)"
+      },
+      {
+        "label": "Sweet potato fries, NFS",
+        "calories": 173,
+        "serving": "1 serving (90 g)"
+      },
+      {
+        "label": "Sweet potato, baked, NS as to fat",
+        "calories": 115,
+        "serving": "1 serving (100 g)"
+      }
+    ]
+  },
+  "almonds": {
+    "top": [
+      {
+        "label": "Almonds, NFS",
+        "calories": 170,
+        "serving": "1 oz (28 g)"
+      },
+      {
+        "label": "Almonds, salted",
+        "calories": 170,
+        "serving": "1 oz (28 g)"
+      },
+      {
+        "label": "Almonds, unroasted",
+        "calories": 177,
+        "serving": "1 oz (28 g)"
+      }
+    ]
+  },
+  "cheddar cheese": {
+    "top": [
+      {
+        "label": "Cheddar Cheese",
+        "calories": 381,
+        "serving": "100 g"
+      },
+      {
+        "label": "West country farmhouse cheddar cheese",
+        "calories": 417,
+        "serving": "100 g"
+      },
+      {
+        "label": "Cheese, Cheddar",
+        "calories": 86,
+        "serving": "1 slice (21 g)"
+      }
+    ]
+  },
+  "orange juice": {
+    "top": [
+      {
+        "label": "Orange juice, 100%, NFS",
+        "calories": 117,
+        "serving": "1 serving (248 g)"
+      },
+      {
+        "label": "Orange juice, 100%, freshly squeezed",
+        "calories": 117,
+        "serving": "1 serving (248 g)"
+      },
+      {
+        "label": "Orange juice, 100%, frozen, reconstituted",
+        "calories": 104,
+        "serving": "1 serving (248 g)"
+      }
+    ]
+  },
+  "peanut butter": {
+    "top": [
+      {
+        "label": "Peanut butter",
+        "calories": 191,
+        "serving": "Guideline amount per sandwich (32 g)"
+      },
+      {
+        "label": "Peanut butter and jelly",
+        "calories": 138,
+        "serving": "Guideline amount per sandwich (32 g)"
+      },
+      {
+        "label": "Peanut butter, lower sodium",
+        "calories": 191,
+        "serving": "Guideline amount per sandwich (32 g)"
+      }
+    ]
+  },
+  "big mac": {
+    "top": [
+      {
+        "label": "Big Mac (McDonalds)",
+        "calories": 535,
+        "serving": "1 McDonald's Big Mac (205 g)"
+      },
+      {
+        "label": "McDONALD'S, BIG MAC",
+        "calories": 563,
+        "serving": "item 7.6 oz (219 g)"
+      },
+      {
+        "label": "[McDonald's] Big Mac",
+        "calories": 509,
+        "serving": "240 g"
+      }
+    ]
+  },
+  "french fries": {
+    "top": [
+      {
+        "label": "Potato, french fries, NFS",
+        "calories": 248,
+        "serving": "1 serving (110 g)"
+      },
+      {
+        "label": "Potato, french fries, NS as to fresh or frozen",
+        "calories": 248,
+        "serving": "1 serving (110 g)"
+      },
+      {
+        "label": "French fries",
+        "calories": 190,
+        "serving": "125.0g"
+      }
+    ]
+  },
+  "chikn brest": {
+    "corrected": "chicken breast",
+    "top": [
+      {
+        "label": "Chicken breast, NS as to cooking method, skin eaten",
+        "calories": 228,
+        "serving": "1 breast (130 g)"
+      },
+      {
+        "label": "Chicken breast, NS as to cooking method, skin not eaten",
+        "calories": 173,
+        "serving": "1 breast (120 g)"
+      },
+      {
+        "label": "Chicken breast, rotisserie, skin not eaten",
+        "calories": 173,
+        "serving": "1 breast (120 g)"
+      }
+    ]
+  },
+  "brocoli": {
+    "corrected": "broccoli",
+    "top": [
+      {
+        "label": "Broccoli, NS as to form, cooked",
+        "calories": 50,
+        "serving": "1 serving (80 g)"
+      },
+      {
+        "label": "Broccoli, fresh, cooked, fat added, NS as to fat type",
+        "calories": 50,
+        "serving": "1 serving (80 g)"
+      },
+      {
+        "label": "Broccoli, frozen, cooked, fat added, NS as to fat type",
+        "calories": 48,
+        "serving": "1 serving (95 g)"
+      }
+    ]
+  }
+}
