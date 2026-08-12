@@ -677,4 +677,142 @@ app.post('/menu', async (req, res) => {
   }
 });
 
+// ── Recipe import from a social link ─────────────────────────────────────────
+// POST /import-recipe  { url }  →  { title, source, sourceUrl, thumbnailUrl, author,
+//                                    rawIngredients[], instructions[], servings }
+//
+// The app can't fetch these itself: TikTok and Instagram block cross-origin reads and serve a
+// login wall to unauthenticated clients, so the fetch has to happen server-side.
+//
+// Two sources of text, in order of reliability:
+//   1. oEmbed  — TikTok and YouTube both publish public, token-free endpoints. TikTok's `title`
+//      field is the POST CAPTION, which is exactly where creators write the ingredient list.
+//   2. OpenGraph tags off the page HTML — the general fallback (blogs, and sometimes Instagram,
+//      whose oEmbed needs a Facebook app token we don't have).
+// Whatever text we recover is handed to the model to turn into a structured ingredient list.
+const OG_RE = (prop) => new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i');
+const OG_RE_REV = (prop) => new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, 'i');
+const decodeEntities = (s) => String(s || '')
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+
+function ogTag(html, prop) {
+  const m = html.match(OG_RE(prop)) || html.match(OG_RE_REV(prop));
+  return m ? decodeEntities(m[1]) : '';
+}
+
+function sourceOf(url) {
+  const h = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+  if (/tiktok\./.test(h)) return 'tiktok';
+  if (/youtube\.|youtu\.be/.test(h)) return 'youtube';
+  if (/instagram\./.test(h)) return 'instagram';
+  return 'blog';
+}
+
+async function fetchWithTimeout(url, opts = {}, ms = 9000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+}
+
+async function oembedFor(source, url) {
+  const endpoint = source === 'tiktok' ? `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`
+    : source === 'youtube' ? `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`
+    : '';
+  if (!endpoint) return null;
+  try {
+    const r = await fetchWithTimeout(endpoint);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function pageMeta(url) {
+  try {
+    // A browser UA matters: several of these hosts serve a stub to unknown agents.
+    const r = await fetchWithTimeout(url, {
+      headers: { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36' },
+    }, 10000);
+    if (!r.ok) return {};
+    const html = (await r.text()).slice(0, 400_000);   // meta tags live in <head>; don't hold a whole page
+    return {
+      title: ogTag(html, 'og:title'),
+      image: ogTag(html, 'og:image'),
+      description: ogTag(html, 'og:description') || ogTag(html, 'description'),
+    };
+  } catch { return {}; }
+}
+
+const IMPORT_SYSTEM = `You turn a social-media food post into a structured recipe.
+You are given the post's caption/description text. Extract ONLY what is actually stated or clearly
+implied by it — never invent a recipe you weren't given.
+Return JSON: {"title":string,"servings":number|null,"rawIngredients":string[],"instructions":string[],"isRecipe":boolean}
+- rawIngredients: one line each, keeping the creator's quantities and wording ("2 chicken breasts, diced").
+- instructions: short imperative steps. Empty array if the post doesn't describe a method.
+- isRecipe: false if the text is not a food recipe at all.
+- title: the dish name, not the caption's hashtags or hype.`;
+
+app.post('/import-recipe', async (req, res) => {
+  if (keyMissing(res)) return;
+  try {
+    const { url } = req.body || {};
+    if (!url || !/^https?:\/\//i.test(String(url))) return res.status(400).json({ error: 'a http(s) url is required' });
+
+    const source = sourceOf(url);
+    const [embed, meta] = await Promise.all([oembedFor(source, url), pageMeta(url)]);
+
+    const caption = [embed?.title, meta.description, meta.title].filter(Boolean).join('\n').trim();
+    const thumbnailUrl = embed?.thumbnail_url || meta.image || null;
+    const author = embed?.author_name || null;
+
+    if (!caption) {
+      // Nothing readable came back — usually a login-walled Instagram post.
+      return res.status(422).json({
+        error: 'no_text',
+        source, sourceUrl: url, thumbnailUrl, author,
+        message: "Couldn't read that post. Paste the recipe text instead and we'll take it from there.",
+      });
+    }
+
+    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        max_tokens: 1200,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: IMPORT_SYSTEM },
+          { role: 'user', content: `Post from ${source}:\n\n${caption.slice(0, 6000)}` },
+        ],
+      }),
+    }, 30000);
+    if (!r.ok) return res.status(502).json({ error: `import failed (${r.status})` });
+
+    const data = await r.json();
+    let parsed;
+    try { parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{}'); }
+    catch { return res.status(502).json({ error: 'import parse error' }); }
+
+    if (parsed.isRecipe === false || !(parsed.rawIngredients || []).length) {
+      return res.status(422).json({
+        error: 'not_a_recipe', source, sourceUrl: url, thumbnailUrl, author,
+        message: "That post doesn't look like a recipe — no ingredients to read.",
+      });
+    }
+
+    res.json({
+      title: String(parsed.title || embed?.title || 'Imported recipe').slice(0, 120),
+      source, sourceUrl: url, thumbnailUrl, author,
+      servings: Number.isFinite(parsed.servings) && parsed.servings > 0 ? Math.round(parsed.servings) : null,
+      rawIngredients: (parsed.rawIngredients || []).map((s) => String(s).trim()).filter(Boolean).slice(0, 40),
+      instructions: (parsed.instructions || []).map((s) => String(s).trim()).filter(Boolean).slice(0, 30),
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'import error' });
+  }
+});
+
 app.listen(PORT, () => console.log(`Food Swap backend listening on :${PORT}  (key ${OPENAI_API_KEY ? 'set' : 'MISSING'})`));
