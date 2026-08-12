@@ -823,4 +823,66 @@ app.post('/import-recipe', async (req, res) => {
   }
 });
 
+// ── Moderation (group posts) ─────────────────────────────────────────────────
+// POST /moderate  { text }  →  { allowed: boolean, reasons: string[] }
+//
+// Two passes, because one tool doesn't cover the brief:
+//   1. OpenAI's moderation endpoint — free, fast, and the right tool for the serious categories
+//      (sexual content, hate, harassment, violence, self-harm). This is what catches nudity.
+//   2. A small model call for the two things moderation does NOT classify: ordinary profanity and
+//      political content. Both are house rules rather than safety categories.
+//
+// Fails CLOSED on the safety pass (an unreachable moderation API blocks the post) and OPEN on the
+// house-rules pass (a hiccup there shouldn't stop someone posting a recipe).
+const HOUSE_RULES = `You screen short posts for a friendly nutrition community.
+Answer ONLY with JSON: {"profanity":boolean,"political":boolean}
+- profanity: swearing or crude insults. Mild frustration ("this is so hard") is fine.
+- political: partisan politics, elections, parties, politicians, divisive social-political campaigning.
+  Ordinary talk about food, diets, health, cost of living or supermarkets is NOT political.`;
+
+app.post('/moderate', async (req, res) => {
+  if (keyMissing(res)) return;
+  const text = String((req.body || {}).text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text is required' });
+
+  const reasons = [];
+  try {
+    const r = await fetchWithTimeout('https://api.openai.com/v1/moderations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: 'omni-moderation-latest', input: text.slice(0, 4000) }),
+    }, 12000);
+    if (!r.ok) throw new Error(`moderation ${r.status}`);
+    const cats = (await r.json())?.results?.[0]?.categories || {};
+    if (cats.sexual || cats['sexual/minors']) reasons.push('sexual');
+    if (cats.hate || cats['hate/threatening'] || cats.harassment || cats['harassment/threatening']) reasons.push('hate');
+    if (cats.violence || cats['violence/graphic']) reasons.push('violence');
+    if (cats['self-harm'] || cats['self-harm/intent'] || cats['self-harm/instructions']) reasons.push('self-harm');
+  } catch {
+    // Safety pass unavailable → refuse rather than let unscreened content through.
+    return res.json({ allowed: false, reasons: ['unavailable'] });
+  }
+
+  try {
+    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        max_tokens: 40,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: HOUSE_RULES }, { role: 'user', content: text.slice(0, 2000) }],
+      }),
+    }, 12000);
+    if (r.ok) {
+      const j = JSON.parse((await r.json())?.choices?.[0]?.message?.content || '{}');
+      if (j.profanity) reasons.push('profanity');
+      if (j.political) reasons.push('political');
+    }
+  } catch { /* house rules are best-effort — don't block a recipe over a timeout */ }
+
+  res.json({ allowed: reasons.length === 0, reasons });
+});
+
 app.listen(PORT, () => console.log(`Food Swap backend listening on :${PORT}  (key ${OPENAI_API_KEY ? 'set' : 'MISSING'})`));
