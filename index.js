@@ -221,6 +221,42 @@ app.post('/vision', async (req, res) => {
 // GET /food-search?q=chicken → { foods: [{ name, brand, serving, calories, protein, carbs, fats }] }
 // Free API; set FDC_API_KEY for higher rate limits (DEMO_KEY works for light testing).
 const FDC_API_KEY = process.env.FDC_API_KEY || 'DEMO_KEY';
+
+// ── Serving sizes ────────────────────────────────────────────────────────────
+// Both sources give nutrition PER 100 g, but each also carries a serving label that usually isn't
+// 100 g ("56 g", "1 burger (219 g)"). Pairing the two without scaling reported a Big Mac as 261 cal
+// — technically the per-100g figure, but presented against a whole burger. In a calorie tracker
+// that is not a cosmetic problem, so nutrition is scaled to whatever serving we display.
+//
+// ml is treated as g. Wrong for oils, close enough for the drinks this actually hits, and far
+// closer than showing a 100 ml figure against a 330 ml can.
+const SERVING_G = /(\d+(?:\.\d+)?)\s*(g|gram|grams|ml|millilitre|milliliter)\b/i;
+
+function servingGrams(label) {
+  const m = String(label || '').match(SERVING_G);
+  if (!m) return null;
+  const n = Number(m[1]);
+  // Sanity bounds: below ~4 g it's a spice measure that would round everything to zero; above
+  // 1500 g it's a catering pack, not a serving.
+  return Number.isFinite(n) && n >= 4 && n <= 1500 ? n : null;
+}
+
+/** Scale a per-100g food onto its real serving, so the numbers match the label beside them. */
+function perServing(food) {
+  const grams = servingGrams(food.serving);
+  if (!grams) return { ...food, serving: '100 g' };   // no usable weight: be honest, say 100 g
+  const k = grams / 100;
+  return {
+    ...food,
+    serving: String(food.serving).trim(),
+    servingGrams: grams,
+    calories: Math.round(food.calories * k),
+    protein: Math.round(food.protein * k),
+    carbs: Math.round(food.carbs * k),
+    fats: Math.round(food.fats * k),
+  };
+}
+
 function fdcNutrient(food, id) {
   const n = (food.foodNutrients || []).find((x) => (x.nutrientId ?? x.nutrient?.id) === id);
   const v = n?.value ?? n?.amount ?? 0;
@@ -368,7 +404,13 @@ function scoreFood(f, q, country) {
   // its curated generic foods as Foundation / SR Legacy. Those are the canonical entries ("Bananas,
   // raw"), whereas Branded rows are packaged goods whose terse names ("BANANA") exact-match a plain
   // query while being something else entirely, e.g. a 467 kcal yogurt-covered snack.
-  if (!brandAsked && f.curated) s += 45;
+  // Raised from 45. USDA's canonical entries carry taxonomic names ("Chicken, broilers or fryers,
+  // breast, meat only, raw") which never match the typed phrase, while a supermarket row named
+  // exactly "Chicken breast" banks the full exact-match bonus. Searching "chicken breast" therefore
+  // returned Coles and Tesco ahead of the generic food. The bonus has to exceed that exact-match
+  // advantage for the canonical entry to lead — but it stays behind brandAsked, so typing a brand
+  // still finds the brand.
+  if (!brandAsked && f.curated) s += 80;
 
   // USDA marks its canonical generic entries "NFS" (Not Further Specified) or "plain". Without this
   // a bare "greek yogurt" returns "Yogurt, Greek, with oats" over plain Greek yogurt, since a
@@ -441,7 +483,7 @@ app.get('/food-search', async (req, res) => {
     .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; });
 
   const start = (page - 1) * PER_PAGE;
-  const foods = ranked.slice(start, start + PER_PAGE);
+  const foods = ranked.slice(start, start + PER_PAGE).map(perServing);
   res.json({ foods, page, hasMore: ranked.length > start + PER_PAGE, sources: { fdc: a.status, off: b.status } });
 });
 
