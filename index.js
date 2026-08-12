@@ -471,6 +471,32 @@ function normalizeOffFood(p) {
 // above "Chicken, breast". Score by how well the name actually matches what was typed.
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// Someone typing an ingredient wants the ingredient, not a dish built from it. Left alone, every
+// base food lost to a composed one — "egg" returned Egg burrito, "salmon" returned Salmon salad,
+// "peanut butter" returned Peanut butter sandwich — because a dish name starts with the ingredient
+// and so banks the full prefix bonus. These are the forms a food gets turned into; the list is
+// USDA-wide vocabulary rather than anything per-food.
+const DISH_WORDS = /\b(salad|sandwich|burrito|taco|wrap|soup|stew|casserole|pie|cake|patty|patties|roll|spread|sauce|gravy|dessert|smoothie|shake|pizza|curry|omelet|omelette|quiche|fritter|nugget|nuggets|tender|tenders|dinner|entree|babyfood|baby food|crackers|bagel|bagels|candies|candy|supplement|lunchmeat|deli|prepackaged|breaded|battered|canned|dip|pudding|custard|topping|filling|bar|bars|snack|snacks|mix|powder|concentrate|stick|sticks|crumbs|chips|stuffing|pretzel|cereal)\b/i;
+
+// Preparations that make a food something more specific than what was asked for. Milder than
+// DISH_WORDS: a fried egg is still an egg, so this only breaks ties.
+const PREP_WORDS = /\b(fried|glazed|seasoned|flavor|flavored|flavour|flavoured|smoked|pickled|marinated|stuffed|coated|creamed|sweetened|reduced fat|fat-free|low fat|light|fruit|honey|vanilla|chocolate|strawberry)\b/i;
+
+// USDA's own markers for "the plain, unqualified version of this food". NFS = Not Further
+// Specified, NS = Not Specified — these are deliberate editorial markers and mean exactly what we
+// want, so they score strongly.
+const GENERIC_STRONG = /\bNFS\b|\bNS as to\b/i;
+// "raw" and "plain" only suggest it. They are ordinary words that also appear in things like
+// "Bread, sticks, plain", so scoring them as highly as NFS put a breadstick above a loaf.
+const GENERIC_WEAK = /\braw\b|\bplain\b/i;
+
+/** Words present in the food's name that the user did not ask for. Used so a penalty only applies
+ *  when the extra term is genuinely unwanted — searching "salmon salad" must still find one. */
+function unaskedMatch(re, name, query) {
+  const m = name.match(re);
+  return m ? !query.includes(m[0].toLowerCase()) : false;
+}
+
 function scoreFood(f, q, country) {
   const query = q.toLowerCase().trim();
   const name = f.name.toLowerCase();
@@ -499,6 +525,18 @@ function scoreFood(f, q, country) {
   else if (new RegExp(`\\b${escRe(query)}`).test(name)) s += 35;
   else if (name.includes(query)) s += 15;
 
+  // Where in the name the match lands matters more than whether the exact phrase appears, because
+  // USDA inverts its canonical names: "Cheese, Cheddar" never contains the phrase "cheddar cheese",
+  // while "Snacks, M&M MARS, COMBOS Snacks Cheddar Cheese Pretzel" does — and so won on the phrase
+  // bonus above. USDA puts the food first and qualifies it afterwards, so a match inside the
+  // opening segments is the subject of the entry; a match in a trailing segment is an ingredient
+  // or flavour of something else.
+  const segments = name.split(',').map((x) => x.trim());
+  const inFirst = words.every((w) => (segments[0] || '').includes(w));
+  const inHead = words.every((w) => segments.slice(0, 2).join(' ').includes(w));
+  if (inFirst) s += 55;
+  else if (inHead) s += 40;
+
   // Is this a product the user can actually buy? OFF is country-filtered upstream, so outside the
   // US only OFF rows are local; inside the US both sources are.
   const local = !country || country === HOME_OF_FDC || f.source === 'off';
@@ -523,38 +561,122 @@ function scoreFood(f, q, country) {
   // still finds the brand.
   if (!brandAsked && f.curated) s += 80;
 
-  // USDA marks its canonical generic entries "NFS" (Not Further Specified) or "plain". Without this
-  // a bare "greek yogurt" returns "Yogurt, Greek, with oats" over plain Greek yogurt, since a
-  // flavoured variant matches the query just as well.
-  if (!brandAsked && /\bNFS\b/i.test(f.name)) s += 18;
-  else if (!brandAsked && /\bplain\b/i.test(f.name)) s += 14;
+  // USDA marks its canonical generic entries NFS / "NS as to" / raw / plain. Without this a bare
+  // "greek yogurt" returns "Yogurt, Greek, with oats" over plain Greek yogurt, since a flavoured
+  // variant matches the query just as well.
+  if (!brandAsked && GENERIC_STRONG.test(f.name)) s += 45;
+  else if (!brandAsked && GENERIC_WEAK.test(f.name)) s += 15;
+
+  // A dish made from the food is not the food. Only counts when the user did not name the dish, so
+  // "salmon salad" still finds one. This is the single biggest correction: without it "egg" is an
+  // Egg burrito and "peanut butter" is a sandwich.
+  if (unaskedMatch(DISH_WORDS, name, query)) s -= 70;
+  if (unaskedMatch(PREP_WORDS, name, query)) s -= 25;
 
   if (country === HOME_OF_FDC && f.source === 'fdc') s += 8;
   else if (country && country !== HOME_OF_FDC && f.source === 'off') s += 30;
 
-  s -= Math.min(20, name.length / 6);          // prefer concise names over long branded strings
+  // Was `name.length / 6`, which decided every tie between FNDDS variants by which name happened to
+  // be shortest — that is how "Chicken breast, roll, oven-roasted" (34 chars) beat "Chicken breast,
+  // grilled without sauce, skin not eaten" (52). Length carries no nutritional meaning. What does
+  // is how many qualifiers USDA had to add to describe the food: fewer means closer to the plain
+  // ingredient. Capped so a verbose branded string can't be pushed below a genuinely worse match.
+  s -= Math.min(12, (name.split(',').length - 1) * 4);
   if (f.protein || f.carbs || f.fats) s += 5;  // complete macros are more useful
   return s;
 }
 
 const dedupeKey = (f) => `${f.brand.toLowerCase()}|${f.name.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
 
-app.get('/food-search', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  const country = offCountry(req.query.country);   // accepts 'US' or 'united-states'
-  // Paging. We over-fetch from both sources, rank the whole pool, then slice, so page 2 is a
-  // genuine continuation of one ranking rather than a second, separately-ranked query.
-  const page = Math.max(1, Math.min(5, parseInt(req.query.page, 10) || 1));
-  const PER_PAGE = 25;
-  if (!q) return res.json({ foods: [], page: 1, hasMore: false });
+// ── LLM assist ───────────────────────────────────────────────────────────────
+// Two things the scoring rules genuinely cannot do: recognise a misspelling, and make the last
+// judgement call between entries that all look reasonable. Both are cached by query, and food
+// searches repeat heavily across users — everyone types "chicken breast" — so in practice this is
+// one cheap call the first time a given phrase is ever searched, and free afterwards.
+const SEARCH_MODEL = process.env.SEARCH_MODEL || 'gpt-4o-mini';
+const SPELL_CACHE = new Map();    // query -> corrected query | null
+const RERANK_CACHE = new Map();   // query + candidates -> winning index
+const LLM_CACHE_MAX = 5000;
 
-  const fdc = (async () => {
+function cachePut(map, k, v) {
+  if (map.size >= LLM_CACHE_MAX) map.clear();
+  map.set(k, v);
+  return v;
+}
+
+async function askJson(messages, maxTokens) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: SEARCH_MODEL, messages, temperature: 0,
+      max_tokens: maxTokens, response_format: { type: 'json_object' },
+    }),
+  });
+  if (!r.ok) throw new Error(`openai ${r.status}`);
+  const j = await r.json();
+  return JSON.parse(j.choices?.[0]?.message?.content || '{}');
+}
+
+/** A corrected spelling, or null if it looked fine. "chikn brest" otherwise reaches USDA verbatim
+ *  and matches "Paris brest", which no amount of re-ranking can recover from. */
+async function spellFix(q) {
+  const key = q.toLowerCase();
+  if (!OPENAI_API_KEY || q.length < 3) return null;
+  if (SPELL_CACHE.has(key)) return SPELL_CACHE.get(key);
+  try {
+    const out = await askJson([
+      { role: 'system', content: 'You fix misspelled food searches. Reply {"q":"<corrected food name>"} if the input is misspelled, or {"q":null} if the spelling is already correct or you cannot tell what food was meant. Only fix spelling — never substitute a different food, and never add words.' },
+      { role: 'user', content: q },
+    ], 30);
+    const fixed = typeof out.q === 'string' && out.q.trim() && out.q.trim().toLowerCase() !== key
+      ? out.q.trim().slice(0, 60) : null;
+    return cachePut(SPELL_CACHE, key, fixed);
+  } catch {
+    return null;   // an outage must not take out search
+  }
+}
+
+/** Move the entry a person most likely meant to the front. The rules get the shortlist right; this
+ *  settles which of several plausible rows leads, which is a judgement call rather than a pattern. */
+async function rerank(q, foods) {
+  if (!OPENAI_API_KEY || foods.length < 2) return foods;
+  const top = foods.slice(0, 12);
+  const key = `${q.toLowerCase()}|${top.map((f) => f.name).join('|')}`;
+  let idx = RERANK_CACHE.get(key);
+  if (idx === undefined) {
+    try {
+      const list = top.map((f, i) => `${i}. ${f.brand ? `[${f.brand}] ` : ''}${f.name}`).join('\n');
+      const out = await askJson([
+        { role: 'system', content: 'Choose which food entry someone most likely meant. Prefer the plain, whole form of the food over dishes, snacks, flavoured or processed variants — unless the search explicitly asks for those. Reply {"i":<index>}.' },
+        { role: 'user', content: `Search: "${q}"\n${list}` },
+      ], 10);
+      idx = cachePut(RERANK_CACHE, key, Number.isInteger(out.i) && out.i >= 0 && out.i < top.length ? out.i : 0);
+    } catch {
+      return foods;
+    }
+  }
+  return idx ? [top[idx], ...foods.filter((_, i) => i !== idx)] : foods;
+}
+
+/** Everything both sources know about a query, unranked. Split out of the handler so a spelling
+ *  correction can simply run it again with the corrected term. */
+async function gatherPool(q, country, page) {
+  // Two passes over USDA, because one is not enough:
+  //
+  //  - The broad pass covers everything, including Survey (FNDDS), USDA's "foods as actually eaten"
+  //    set of composed dishes like "Burrito, NFS". Without it a search for a real meal returns only
+  //    its parts or a frozen version of it.
+  //  - But USDA's own relevance ranks that pass, and for a plain ingredient it can bury the
+  //    ingredient entirely: "egg", "peanut butter" and "pasta" returned 60 rows with no whole egg,
+  //    no jar of peanut butter and no plain pasta among them. Ranking cannot rescue a row that was
+  //    never fetched, so a second pass restricted to the curated ingredient sets guarantees the
+  //    base food is at least a candidate. Its own ordering is poor — "milk" leads with "Crackers,
+  //    milk" — but that does not matter, since scoreFood re-ranks the merged pool.
+  const fdcSearch = async (dataType, pageSize) => {
     const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${FDC_API_KEY}`
-      // Survey (FNDDS) is USDA's "foods as actually eaten" set: composed dishes like "Burrito, NFS"
-      // and "Mexican pizza". The other three cover raw ingredients and supermarket packages, so
-      // without it a search for a real meal returns only its parts or a frozen version of it.
-      + `&query=${encodeURIComponent(q)}&pageSize=60`
-      + `&dataType=${encodeURIComponent('Foundation,SR Legacy,Survey (FNDDS),Branded')}`;
+      + `&query=${encodeURIComponent(q)}&pageSize=${pageSize}`
+      + `&dataType=${encodeURIComponent(dataType)}`;
     // USDA's edge randomly returns nginx 400s, measured at roughly 1 in 3 on identical URLs. It is
     // not the key, the query or the payload size (limiting nutrients changes nothing), so the only
     // defence is retrying. Without this the whole US catalogue silently vanished from a third of
@@ -568,9 +690,19 @@ app.get('/food-search', async (req, res) => {
           .map(normalizeFdcFood).filter(Boolean).map((f) => ({ ...f, source: 'fdc' }));
       }
       last = r.status;
-      await new Promise((res) => setTimeout(res, 250 * (i + 1)));
+      await new Promise((done) => setTimeout(done, 250 * (i + 1)));
     }
     throw new Error(`fdc ${last}`);
+  };
+
+  const fdc = (async () => {
+    const [broad, curated] = await Promise.allSettled([
+      fdcSearch('Foundation,SR Legacy,Survey (FNDDS),Branded', 60),
+      fdcSearch('Foundation,SR Legacy', 25),
+    ]);
+    // The curated pass is a supplement; only a failure of the broad one is a failed search.
+    if (broad.status === 'rejected') throw broad.reason;
+    return [...broad.value, ...(curated.status === 'fulfilled' ? curated.value : [])];
   })();
 
   // Hit both in parallel; one source failing (FDC rate limits hard on DEMO_KEY) must not take out
@@ -578,6 +710,28 @@ app.get('/food-search', async (req, res) => {
   const [a, b] = await Promise.allSettled([fdc, searchOpenFoodFacts(q, country, page)]);
   const all = [...(a.status === 'fulfilled' ? a.value : []),
                ...(b.status === 'fulfilled' ? b.value : [])].filter((f) => f && f.calories > 0);
+  return { all, a, b };
+}
+
+app.get('/food-search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const country = offCountry(req.query.country);   // accepts 'US' or 'united-states'
+  // Paging. We over-fetch from both sources, rank the whole pool, then slice, so page 2 is a
+  // genuine continuation of one ranking rather than a second, separately-ranked query.
+  const page = Math.max(1, Math.min(5, parseInt(req.query.page, 10) || 1));
+  const PER_PAGE = 25;
+  if (!q) return res.json({ foods: [], page: 1, hasMore: false });
+
+  // The spell check runs alongside the search rather than before it, so a correctly spelled query —
+  // almost all of them — waits on nothing. Only a genuine typo pays for the second lookup.
+  const [pool, fixed] = await Promise.all([gatherPool(q, country, page), spellFix(q)]);
+  let { all, a, b } = pool;
+  let used = q;
+  if (fixed) {
+    const alt = await gatherPool(fixed, country, page);
+    // Keep the correction only if it actually found something; otherwise the original stands.
+    if (alt.all.length) ({ all, a, b } = alt), (used = fixed);
+  }
 
   if (!all.length) {
     const why = [a, b].filter((x) => x.status === 'rejected').map((x) => String(x.reason)).join('; ');
@@ -587,17 +741,28 @@ app.get('/food-search', async (req, res) => {
 
   const seen = new Set();
   const ranked = all
-    .map((f) => ({ f, s: scoreFood(f, q, country) }))
+    .map((f) => ({ f, s: scoreFood(f, used, country) }))
     .filter((x) => x.s > -1000)                    // drop anything that failed the coverage gate
     .sort((x, y) => y.s - x.s)
     .map((x) => x.f)
     .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; });
 
   const start = (page - 1) * PER_PAGE;
+  let slice = ranked.slice(start, start + PER_PAGE);
+  // Only the first page is re-ranked: it is the only one where which entry leads really matters,
+  // and it keeps this to one model call per distinct search rather than one per page.
+  if (page === 1) slice = await rerank(used, slice);
+
   // Portions are resolved only for the page being returned, not the whole ranked pool — that keeps
   // it to one extra USDA request for at most 25 ids.
-  const foods = (await withPortions(ranked.slice(start, start + PER_PAGE))).map(perServing);
-  res.json({ foods, page, hasMore: ranked.length > start + PER_PAGE, sources: { fdc: a.status, off: b.status } });
+  const foods = (await withPortions(slice)).map(perServing);
+  res.json({
+    foods,
+    page,
+    hasMore: ranked.length > start + PER_PAGE,
+    corrected: used !== q ? used : undefined,   // so the app can show "showing results for ..."
+    sources: { fdc: a.status, off: b.status },
+  });
 });
 
 // ── Coach chat (real LLM, grounded in the user's profile + chosen tone) ───────
