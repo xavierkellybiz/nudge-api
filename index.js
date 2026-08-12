@@ -619,6 +619,19 @@ async function askJson(messages, maxTokens) {
   return JSON.parse(j.choices?.[0]?.message?.content || '{}');
 }
 
+/** Levenshtein distance, used only to check a spelling correction stayed close to what was typed. */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
 /** A corrected spelling, or null if it looked fine. "chikn brest" otherwise reaches USDA verbatim
  *  and matches "Paris brest", which no amount of re-ranking can recover from. */
 async function spellFix(q) {
@@ -630,9 +643,14 @@ async function spellFix(q) {
       { role: 'system', content: 'You fix misspelled food searches. Reply with JSON {"q":"<corrected food name>"} if the input is misspelled, or {"q":null} if the spelling is already correct or you cannot tell what food was meant. Only fix spelling — never substitute a different food, and never add words.' },
       { role: 'user', content: q },
     ], 30);
-    const fixed = typeof out.q === 'string' && out.q.trim() && out.q.trim().toLowerCase() !== key
-      ? out.q.trim().slice(0, 60) : null;
-    LAST_LLM_NOTE = `spell:${JSON.stringify(out)}`;
+    const raw = typeof out.q === 'string' ? out.q.trim().slice(0, 60) : '';
+    // A correction has to still be the same word. Nothing stops the model "correcting" a brand it
+    // does not recognise into a different food entirely, and quietly logging someone a food they
+    // never searched for is far worse than showing them no result. Only near-misses are accepted.
+    const near = raw && raw.toLowerCase() !== key
+      && editDistance(key, raw.toLowerCase()) <= Math.max(2, Math.round(raw.length * 0.34));
+    const fixed = near ? raw : null;
+    LAST_LLM_NOTE = `spell:${JSON.stringify(out)} accepted=${!!fixed}`;
     return cachePut(SPELL_CACHE, key, fixed);
   } catch (e) {
     LAST_LLM_NOTE = `spell error: ${e.message}`;
@@ -641,17 +659,27 @@ async function spellFix(q) {
 }
 
 /** Move the entry a person most likely meant to the front. The rules get the shortlist right; this
- *  settles which of several plausible rows leads, which is a judgement call rather than a pattern. */
-async function rerank(q, foods) {
-  if (!OPENAI_API_KEY || foods.length < 2) return foods;
-  const top = foods.slice(0, 12);
+ *  settles which of several plausible rows leads, which is a judgement call rather than a pattern.
+ *
+ *  It only ever reorders rows the rules already scored close to the winner. Given the full page it
+ *  answered "big mac" with "Macaroni or noodles with cheese, Easy Mac type" — reading mac as
+ *  macaroni and overturning a correct result that the rules had ranked far higher. Settling a close
+ *  call is a judgement; overturning a decisive one is a regression. */
+const RERANK_BAND = 25;
+
+async function rerank(q, pairs) {
+  const foods = pairs.map((p) => p.f);
+  if (!OPENAI_API_KEY || pairs.length < 2) return foods;
+  const best = pairs[0].s;
+  const top = pairs.slice(0, 12).filter((p) => p.s >= best - RERANK_BAND).map((p) => p.f);
+  if (top.length < 2) return foods;           // the rules were decisive; nothing to settle
   const key = `${q.toLowerCase()}|${top.map((f) => f.name).join('|')}`;
   let idx = RERANK_CACHE.get(key);
   if (idx === undefined) {
     try {
       const list = top.map((f, i) => `${i}. ${f.brand ? `[${f.brand}] ` : ''}${f.name}`).join('\n');
       const out = await askJson([
-        { role: 'system', content: 'Choose which food entry someone most likely meant. Prefer the plain, whole form of the food over dishes, snacks, flavoured or processed variants — unless the search explicitly asks for those. Reply with JSON {"i":<index>}.' },
+        { role: 'system', content: 'Choose which food entry someone most likely meant. Prefer the plain, whole form of the food over dishes, snacks, flavoured or processed variants — unless the search explicitly asks for those. If the search names a brand, restaurant or specific product, keep that product. Reply with JSON {"i":<index>}.' },
         { role: 'user', content: `Search: "${q}"\n${list}` },
       ], 10);
       idx = cachePut(RERANK_CACHE, key, Number.isInteger(out.i) && out.i >= 0 && out.i < top.length ? out.i : 0);
@@ -660,7 +688,9 @@ async function rerank(q, foods) {
       return foods;
     }
   }
-  return idx ? [top[idx], ...foods.filter((_, i) => i !== idx)] : foods;
+  if (!idx) return foods;
+  const pick = top[idx];
+  return [pick, ...foods.filter((f) => f !== pick)];
 }
 
 /** Everything both sources know about a query, unranked. Split out of the handler so a spelling
@@ -744,18 +774,19 @@ app.get('/food-search', async (req, res) => {
   }
 
   const seen = new Set();
+  // Scores are carried alongside the foods rather than discarded, because rerank needs to know how
+  // decisive the ranking was before it is allowed to overturn it.
   const ranked = all
     .map((f) => ({ f, s: scoreFood(f, used, country) }))
     .filter((x) => x.s > -1000)                    // drop anything that failed the coverage gate
     .sort((x, y) => y.s - x.s)
-    .map((x) => x.f)
-    .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; });
+    .filter((x) => { const k = dedupeKey(x.f); if (seen.has(k)) return false; seen.add(k); return true; });
 
   const start = (page - 1) * PER_PAGE;
-  let slice = ranked.slice(start, start + PER_PAGE);
+  const pairs = ranked.slice(start, start + PER_PAGE);
   // Only the first page is re-ranked: it is the only one where which entry leads really matters,
   // and it keeps this to one model call per distinct search rather than one per page.
-  if (page === 1) slice = await rerank(used, slice);
+  let slice = page === 1 ? await rerank(used, pairs) : pairs.map((p) => p.f);
 
   // Portions are resolved only for the page being returned, not the whole ranked pool — that keeps
   // it to one extra USDA request for at most 25 ids.
