@@ -756,13 +756,21 @@ Return JSON: {"title":string,"servings":number|null,"rawIngredients":string[],"i
 app.post('/import-recipe', async (req, res) => {
   if (keyMissing(res)) return;
   try {
-    const { url } = req.body || {};
-    if (!url || !/^https?:\/\//i.test(String(url))) return res.status(400).json({ error: 'a http(s) url is required' });
+    // Two ways in. A `url` we fetch ourselves, or `text` the user pasted by hand — the escape hatch
+    // for anything behind a login wall (Instagram, private accounts, Stories), which no amount of
+    // server-side fetching can read. Both can be supplied: the text carries the recipe, the url
+    // still yields a thumbnail.
+    const { url, text } = req.body || {};
+    const pasted = typeof text === 'string' ? text.trim() : '';
+    const hasUrl = !!url && /^https?:\/\//i.test(String(url));
+    if (!pasted && !hasUrl) return res.status(400).json({ error: 'a http(s) url or recipe text is required' });
 
-    const source = sourceOf(url);
-    const [embed, meta] = await Promise.all([oembedFor(source, url), pageMeta(url)]);
+    const source = hasUrl ? sourceOf(url) : 'user';
+    const [embed, meta] = hasUrl
+      ? await Promise.all([oembedFor(source, url), pageMeta(url)])
+      : [null, {}];
 
-    const caption = [embed?.title, meta.description, meta.title].filter(Boolean).join('\n').trim();
+    const caption = pasted || [embed?.title, meta.description, meta.title].filter(Boolean).join('\n').trim();
     const thumbnailUrl = embed?.thumbnail_url || meta.image || null;
     const author = embed?.author_name || null;
 
@@ -770,7 +778,7 @@ app.post('/import-recipe', async (req, res) => {
       // Nothing readable came back — usually a login-walled Instagram post.
       return res.status(422).json({
         error: 'no_text',
-        source, sourceUrl: url, thumbnailUrl, author,
+        source, sourceUrl: hasUrl ? url : null, thumbnailUrl, author,
         message: "Couldn't read that post. Paste the recipe text instead and we'll take it from there.",
       });
     }
@@ -785,7 +793,7 @@ app.post('/import-recipe', async (req, res) => {
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: IMPORT_SYSTEM },
-          { role: 'user', content: `Post from ${source}:\n\n${caption.slice(0, 6000)}` },
+          { role: 'user', content: `${pasted ? 'Recipe text pasted by the user' : `Post from ${source}`}:\n\n${caption.slice(0, 6000)}` },
         ],
       }),
     }, 30000);
@@ -798,14 +806,14 @@ app.post('/import-recipe', async (req, res) => {
 
     if (parsed.isRecipe === false || !(parsed.rawIngredients || []).length) {
       return res.status(422).json({
-        error: 'not_a_recipe', source, sourceUrl: url, thumbnailUrl, author,
+        error: 'not_a_recipe', source, sourceUrl: hasUrl ? url : null, thumbnailUrl, author,
         message: "That post doesn't look like a recipe — no ingredients to read.",
       });
     }
 
     res.json({
       title: String(parsed.title || embed?.title || 'Imported recipe').slice(0, 120),
-      source, sourceUrl: url, thumbnailUrl, author,
+      source, sourceUrl: hasUrl ? url : null, thumbnailUrl, author,
       servings: Number.isFinite(parsed.servings) && parsed.servings > 0 ? Math.round(parsed.servings) : null,
       rawIngredients: (parsed.rawIngredients || []).map((s) => String(s).trim()).filter(Boolean).slice(0, 40),
       instructions: (parsed.instructions || []).map((s) => String(s).trim()).filter(Boolean).slice(0, 30),
