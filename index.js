@@ -243,7 +243,9 @@ function servingGrams(label) {
 
 /** Scale a per-100g food onto its real serving, so the numbers match the label beside them. */
 function perServing(food) {
-  const grams = servingGrams(food.serving);
+  // A weight already resolved from USDA's portion table wins: it came from a structured gramWeight
+  // rather than a string, so it never depends on the label parsing cleanly.
+  const grams = food.servingGrams || servingGrams(food.serving);
   if (!grams) return { ...food, serving: '100 g' };   // no usable weight: be honest, say 100 g
   const k = grams / 100;
   return {
@@ -272,6 +274,7 @@ function normalizeFdcFood(food) {
     brand,
     // Foundation / SR Legacy are USDA's curated generic foods; Branded is packaged products.
     curated: /Foundation|SR Legacy|Survey/i.test(String(food.dataType || '')),
+    fdcId: food.fdcId,   // kept so the page of results can be enriched with household portions
     serving,
     calories: Math.round(fdcNutrient(food, 1008)),   // Energy (kcal)
     protein: Math.round(fdcNutrient(food, 1003)),    // Protein
@@ -279,6 +282,114 @@ function normalizeFdcFood(food) {
     fats: Math.round(fdcNutrient(food, 1004)),       // Total lipid (fat)
   };
 }
+// ── Household portions ───────────────────────────────────────────────────────
+// USDA's curated foods carry no servingSize, so they were all reported as "100 g" — technically
+// true and practically useless, because nobody logs 100 g of Big Mac. The gram weight of a real
+// portion ("1 McDonald's Big Mac = 205 g", "1 banana = 140 g") does exist, but only on the detail
+// endpoint, which search never returned: `foodPortions` comes back empty in search results.
+//
+// So the page of results is enriched afterwards. POST /fdc/v1/foods takes a list of ids, which
+// means one extra request for the whole page rather than one per food.
+const PORTION_CACHE = new Map();      // fdcId -> {desc, g} | null  (null = looked up, has none)
+const PORTION_CACHE_MAX = 2000;
+
+// "1 oz, raw, yields" and "per surface inch of pizza" are analytical measures, not servings.
+const PORTION_SKIP = /\byields\b|per surface|per cubic/i;
+const QNS = /quantity not specified/i;
+
+// Which label reads best when several portions weigh the same. "1 medium breast" beats "1 breast,
+// NS as to size" (USDA's internal wording), which beats "1 cup, cooked, diced" (a measure of a
+// processed form rather than the item itself).
+function labelRank(desc) {
+  if (/\bNS as to\b/i.test(desc)) return 3;
+  if (/\b(cup|oz|tbsp|tsp|slice|linear inch|mashed|diced|chopped|shredded)\b/i.test(desc)) return 2;
+  return 1;
+}
+
+// Sanity bounds, as in servingGrams: under ~4 g every macro rounds to zero, over 1500 g it's a
+// catering pack rather than a portion.
+const inBounds = (g) => g >= 4 && g <= 1500;
+
+/** The portion most like something a person would actually eat, or null.
+ *
+ *  The ordering USDA returns is NOT the sequence order, and the first entry is often wrong for our
+ *  purposes: for "Banana, raw" it is "1 cup, mashed". What is reliable is the "Quantity not
+ *  specified" row — despite the name it holds the weight typically eaten (banana 126 g, french
+ *  fries 110 g, Big Mac 205 g), which is exactly the serving we want. Its label is useless though,
+ *  so it picks the weight and a same-weight named portion supplies the words. */
+function bestPortion(portions) {
+  const all = (portions || [])
+    .map((p) => ({
+      desc: String(p.portionDescription || p.modifier || '').trim(),
+      g: Number(p.gramWeight),
+      seq: Number(p.sequenceNumber) || 999,
+    }))
+    .filter((p) => p.desc && Number.isFinite(p.g) && p.g > 0);
+
+  const named = all.filter((p) => !QNS.test(p.desc) && !PORTION_SKIP.test(p.desc) && inBounds(p.g));
+  const typical = all.find((p) => QNS.test(p.desc));
+
+  if (typical && inBounds(typical.g)) {
+    const match = named
+      .filter((p) => Math.abs(p.g - typical.g) <= Math.max(1, typical.g * 0.02))
+      .sort((a, b) => labelRank(a.desc) - labelRank(b.desc) || a.seq - b.seq)[0];
+    // Nothing named matches the typical weight (chips and fries come only as single pieces), so
+    // report the honest weight under a neutral label rather than logging someone a single chip.
+    return match ? { desc: match.desc, g: match.g } : { desc: '1 serving', g: typical.g };
+  }
+
+  // No typical weight: fall back to USDA's own canonical ordering.
+  const first = named.sort((a, b) => a.seq - b.seq)[0];
+  return first ? { desc: first.desc, g: first.g } : null;
+}
+
+async function fetchPortions(ids) {
+  const url = `https://api.nal.usda.gov/fdc/v1/foods?api_key=${FDC_API_KEY}`;
+  // Same nginx flakiness the search call has to defend against.
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fdcIds: ids, format: 'full' }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      return Array.isArray(data) ? data : [];
+    }
+    await new Promise((done) => setTimeout(done, 250 * (i + 1)));
+  }
+  throw new Error('fdc portions unavailable');
+}
+
+/** Replace "100 g" with a real portion wherever USDA knows one. Never throws: a food with no
+ *  portion, or an outage on this second call, simply keeps the per-100g figure it already had. */
+async function withPortions(foods) {
+  const wanted = foods
+    .filter((f) => f.source === 'fdc' && f.fdcId && f.serving === '100 g')
+    .map((f) => f.fdcId);
+  const missing = [...new Set(wanted)].filter((id) => !PORTION_CACHE.has(id));
+
+  if (missing.length) {
+    try {
+      for (const food of await fetchPortions(missing)) {
+        if (PORTION_CACHE.size >= PORTION_CACHE_MAX) PORTION_CACHE.clear();
+        PORTION_CACHE.set(food.fdcId, bestPortion(food.foodPortions));
+      }
+      // Anything the response omitted is cached as "none" so it isn't re-requested every search.
+      for (const id of missing) if (!PORTION_CACHE.has(id)) PORTION_CACHE.set(id, null);
+    } catch {
+      return foods;   // portions are an enhancement; losing them must not lose the search
+    }
+  }
+
+  return foods.map((f) => {
+    const p = f.fdcId && f.serving === '100 g' ? PORTION_CACHE.get(f.fdcId) : null;
+    if (!p) return f;
+    // servingGrams is what perServing scales by; the label is only what the user reads.
+    return { ...f, serving: `${p.desc} (${Math.round(p.g)} g)`, servingGrams: p.g };
+  });
+}
+
 // ── Open Food Facts (text search) ────────────────────────────────────────────
 // USDA's branded catalogue is US packaged goods, which is close to useless for UK shoppers looking
 // for Tesco / Sainsbury's / Greggs. OFF has ~3M products with strong UK+EU coverage and needs no
@@ -483,7 +594,9 @@ app.get('/food-search', async (req, res) => {
     .filter((f) => { const k = dedupeKey(f); if (seen.has(k)) return false; seen.add(k); return true; });
 
   const start = (page - 1) * PER_PAGE;
-  const foods = ranked.slice(start, start + PER_PAGE).map(perServing);
+  // Portions are resolved only for the page being returned, not the whole ranked pool — that keeps
+  // it to one extra USDA request for at most 25 ids.
+  const foods = (await withPortions(ranked.slice(start, start + PER_PAGE))).map(perServing);
   res.json({ foods, page, hasMore: ranked.length > start + PER_PAGE, sources: { fdc: a.status, off: b.status } });
 });
 
