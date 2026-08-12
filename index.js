@@ -594,7 +594,6 @@ const dedupeKey = (f) => `${f.brand.toLowerCase()}|${f.name.toLowerCase().replac
 // searches repeat heavily across users — everyone types "chicken breast" — so in practice this is
 // one cheap call the first time a given phrase is ever searched, and free afterwards.
 const SEARCH_MODEL = process.env.SEARCH_MODEL || 'gpt-4o-mini';
-let LAST_LLM_NOTE = 'none';   // temporary: surfaced via ?debug=1 while wiring this up
 const SPELL_CACHE = new Map();    // query -> corrected query | null
 const RERANK_CACHE = new Map();   // query + candidates -> winning index
 const LLM_CACHE_MAX = 5000;
@@ -650,10 +649,8 @@ async function spellFix(q) {
     const near = raw && raw.toLowerCase() !== key
       && editDistance(key, raw.toLowerCase()) <= Math.max(2, Math.round(raw.length * 0.34));
     const fixed = near ? raw : null;
-    LAST_LLM_NOTE = `spell:${JSON.stringify(out)} accepted=${!!fixed}`;
     return cachePut(SPELL_CACHE, key, fixed);
-  } catch (e) {
-    LAST_LLM_NOTE = `spell error: ${e.message}`;
+  } catch {
     return null;   // an outage must not take out search
   }
 }
@@ -683,8 +680,7 @@ async function rerank(q, pairs) {
         { role: 'user', content: `Search: "${q}"\n${list}` },
       ], 10);
       idx = cachePut(RERANK_CACHE, key, Number.isInteger(out.i) && out.i >= 0 && out.i < top.length ? out.i : 0);
-    } catch (e) {
-      LAST_LLM_NOTE += ` | rerank error: ${e.message}`;
+    } catch {
       return foods;
     }
   }
@@ -797,7 +793,6 @@ app.get('/food-search', async (req, res) => {
     hasMore: ranked.length > start + PER_PAGE,
     corrected: used !== q ? used : undefined,   // so the app can show "showing results for ..."
     sources: { fdc: a.status, off: b.status },
-    debug: req.query.debug === '1' ? { hasKey: !!OPENAI_API_KEY, model: SEARCH_MODEL, note: LAST_LLM_NOTE } : undefined,
   });
 });
 
