@@ -627,7 +627,7 @@ async function spellFix(q) {
   if (SPELL_CACHE.has(key)) return SPELL_CACHE.get(key);
   try {
     const out = await askJson([
-      { role: 'system', content: 'You fix misspelled food searches. Reply {"q":"<corrected food name>"} if the input is misspelled, or {"q":null} if the spelling is already correct or you cannot tell what food was meant. Only fix spelling — never substitute a different food, and never add words.' },
+      { role: 'system', content: 'You fix misspelled food searches. Reply with JSON {"q":"<corrected food name>"} if the input is misspelled, or {"q":null} if the spelling is already correct or you cannot tell what food was meant. Only fix spelling — never substitute a different food, and never add words.' },
       { role: 'user', content: q },
     ], 30);
     const fixed = typeof out.q === 'string' && out.q.trim() && out.q.trim().toLowerCase() !== key
@@ -651,7 +651,7 @@ async function rerank(q, foods) {
     try {
       const list = top.map((f, i) => `${i}. ${f.brand ? `[${f.brand}] ` : ''}${f.name}`).join('\n');
       const out = await askJson([
-        { role: 'system', content: 'Choose which food entry someone most likely meant. Prefer the plain, whole form of the food over dishes, snacks, flavoured or processed variants — unless the search explicitly asks for those. Reply {"i":<index>}.' },
+        { role: 'system', content: 'Choose which food entry someone most likely meant. Prefer the plain, whole form of the food over dishes, snacks, flavoured or processed variants — unless the search explicitly asks for those. Reply with JSON {"i":<index>}.' },
         { role: 'user', content: `Search: "${q}"\n${list}` },
       ], 10);
       idx = cachePut(RERANK_CACHE, key, Number.isInteger(out.i) && out.i >= 0 && out.i < top.length ? out.i : 0);
