@@ -862,7 +862,7 @@ async function openaiChatWithRetry(body, tries = 3) {
 app.post('/coach', async (req, res) => {
   if (keyMissing(res)) return;
   try {
-    const { message, profile, targets, history } = req.body || {};
+    const { message, profile, targets, history, image } = req.body || {};
     if (!message) return res.status(400).json({ error: 'no message' });
     const hist = (Array.isArray(history) ? history : []).slice(-8)
       .map((m) => ({ role: m.role === 'coach' ? 'assistant' : 'user', content: String(m.text || '').slice(0, 800) }))
@@ -874,7 +874,20 @@ app.post('/coach', async (req, res) => {
       messages: [
         { role: 'system', content: coachSystemPrompt(profile, targets) },
         ...hist,
-        { role: 'user', content: String(message) },
+        // The Coach screen can attach a photo. Without passing it through, the upload is silently
+        // dropped and the coach answers as though it never saw the picture.
+        {
+          role: 'user',
+          content: image?.base64
+            ? [
+                { type: 'text', text: String(message) },
+                {
+                  type: 'image_url',
+                  image_url: { url: `data:${image.mime || 'image/jpeg'};base64,${image.base64}`, detail: 'high' },
+                },
+              ]
+            : String(message),
+        },
       ],
     });
     if (!r.ok) return res.status(502).json({ error: `coach failed (${r.status})` });
