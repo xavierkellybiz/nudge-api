@@ -990,8 +990,12 @@ For each dish, list its ingredients EXACTLY as printed on the menu. For each ing
 
 Do NOT compute dish calories, totals, macros, or any ranking — ONLY the ingredient rows. The application does all calorie math.
 
+Also locate each dish on the photo so the app can show the diner exactly where it is on the menu:
+- "page": which image it appears on (1 = the first image you were given).
+- "box": the bounding box of the dish's name AND its description/price line(s) on that page, as [x0, y0, x1, y1] on a 0–1000 grid where (0,0) is the top-left corner of the image and (1000,1000) the bottom-right. Cover the whole block for that one dish, not the section it sits in. Always give your best estimate; never omit it.
+
 Return VALID JSON ONLY:
-{ "items": [ { "name": "", "portion": "", "ingredients": [ { "name": "", "grams": 0 } ] } ] }`;
+{ "items": [ { "name": "", "portion": "", "page": 1, "box": [0, 0, 0, 0], "ingredients": [ { "name": "", "grams": 0 } ] } ] }`;
 
 app.post('/menu', async (req, res) => {
   if (keyMissing(res)) return;

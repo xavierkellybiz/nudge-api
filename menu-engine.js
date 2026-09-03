@@ -125,10 +125,15 @@ function computeItem(it, log) {
 
   if (log) log(`  • "${name}" → ${kcal} kcal → range ${lo}-${hi}${floored ? ` (FLOOR ${floor})` : ''} | ${ings.map((x) => `${x.name}:${x.grams}g=${x.kcal}`).join('; ')}`);
 
+  // Where the dish sits on the photographed menu (page index + 0–1000 box) — passed straight
+  // through from the reader; the app validates and normalises it.
+  const page = Number.isInteger(Number(it && it.page)) && Number(it.page) >= 1 ? Number(it.page) : undefined;
+  const box = Array.isArray(it && it.box) && it.box.length >= 4 ? it.box.slice(0, 4).map(Number) : undefined;
   return {
     name, calorie_low: lo, calorie_high: hi,
     protein_g: Math.round(p), carbs_g: Math.round(c), fat_g: Math.round(f),
     confidence, reasoning, ingredients: ings,
+    page, box,
   };
 }
 
