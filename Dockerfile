@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 # Copy only the source we need (never the .env or logs).
-COPY index.js menu-engine.js ./
+COPY index.js menu-engine.js menu-locate.js ./
 ENV NODE_ENV=production
 EXPOSE 8787
 CMD ["node", "index.js"]

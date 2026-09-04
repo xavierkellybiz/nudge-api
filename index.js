@@ -978,6 +978,7 @@ app.post('/exercise', async (req, res) => {
 // ── Menu (photo of a menu → ingredient-reasoned dishes + goal-ranked top 3) ───
 const MENU_MODEL = process.env.MENU_MODEL || VISION_MODEL;
 const { estimateMenu } = require('./menu-engine');
+const { locateDishes } = require('./menu-locate');
 const fs = require('fs');
 const MENU_LOG = require('path').join(__dirname, 'menu-debug.log');
 function mlog(...a) { try { fs.appendFileSync(MENU_LOG, `[${new Date().toISOString()}] ${a.map(String).join(' ')}\n`); } catch (e) { /* logging is best-effort */ } }
@@ -1012,6 +1013,9 @@ app.post('/menu', async (req, res) => {
     const content = [{ type: 'text', text: `Read this menu (${images.length} page image(s)). Extract every dish and its ingredient grams. Return ONLY the JSON.` }];
     for (const im of images) content.push({ type: 'image_url', image_url: { url: `data:${im.mime || 'image/jpeg'};base64,${im.base64}`, detail: 'high' } });
 
+    // OCR the pages in parallel with the model read — it's how each dish gets snapped to its exact
+    // printed line (menu-locate.js); the model's own box is only the fallback.
+    const ocrWarm = locateDishes([], images, mlog).catch(() => null);
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -1042,7 +1046,9 @@ app.post('/menu', async (req, res) => {
       return res.status(502).json({ error: 'menu parse error', finish });
     }
     const modelItems = Array.isArray(parsed.items) ? parsed.items : [];
-    mlog('extracted', modelItems.length, 'dishes from model. Computing ingredient-summed calories:');
+    mlog('extracted', modelItems.length, 'dishes from model. Locating each on the page, then computing ingredient-summed calories:');
+    await ocrWarm;
+    try { await locateDishes(modelItems, images, mlog); } catch (e) { mlog('locate failed (keeping model boxes):', String(e && e.message || e)); }
     const result = estimateMenu(modelItems, g, mlog);   // <-- deterministic engine does all the math + ranking
     mlog('computed', result.items.length, 'items; TOP3:', result.top.map((t) => `${t.name} (${t.calorie_low}-${t.calorie_high})`).join(' | '), '\n');
     res.json({ ...result, pagesRead: images.length, dishesFound: modelItems.length });

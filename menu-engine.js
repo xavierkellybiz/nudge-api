@@ -133,7 +133,7 @@ function computeItem(it, log) {
     name, calorie_low: lo, calorie_high: hi,
     protein_g: Math.round(p), carbs_g: Math.round(c), fat_g: Math.round(f),
     confidence, reasoning, ingredients: ings,
-    page, box,
+    page, box, box_source: box ? (it.box_source === 'ocr' ? 'ocr' : 'model') : undefined,
   };
 }
 
