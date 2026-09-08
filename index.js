@@ -207,7 +207,10 @@ app.post('/vision', aiQuota, async (req, res) => {
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: VISION_MODEL,
-        max_tokens: Number(process.env.VISION_MAX_TOKENS) || 2000,
+        // max_completion_tokens, NOT max_tokens: models from gpt-5 onward reject the old name
+        // outright ("Unsupported parameter"), while gpt-4o and gpt-4o-mini accept the new one. One
+        // shape therefore works across every model, which matters because the model is env-configurable.
+        max_completion_tokens: Number(process.env.VISION_MAX_TOKENS) || 2000,
         temperature: 0,   // deterministic → the same photo returns the same calories/macros (Log == Swap)
         response_format: { type: 'json_object' },
         messages: [
@@ -623,7 +626,7 @@ async function askJson(messages, maxTokens) {
     headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: SEARCH_MODEL, messages, temperature: 0,
-      max_tokens: maxTokens, response_format: { type: 'json_object' },
+      max_completion_tokens: maxTokens, response_format: { type: 'json_object' },
     }),
   });
   if (!r.ok) throw new Error(`openai ${r.status}`);
@@ -883,7 +886,7 @@ app.post('/coach', aiQuota, async (req, res) => {
     const r = await openaiChatWithRetry({
       model: COACH_MODEL,
       temperature: 0.4,
-      max_tokens: 220,
+      max_completion_tokens: 220,
       messages: [
         { role: 'system', content: coachSystemPrompt(profile, targets) },
         ...hist,
@@ -953,7 +956,7 @@ app.post('/exercise', aiQuota, async (req, res) => {
     const r = await openaiChatWithRetry({
       model: COACH_MODEL,
       temperature: 0,
-      max_tokens: 160,
+      max_completion_tokens: 160,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: EXERCISE_SYSTEM },
@@ -1030,7 +1033,7 @@ app.post('/menu', aiQuota, async (req, res) => {
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: MENU_MODEL,
-        max_tokens: 8000,
+        max_completion_tokens: 8000,
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: MENU_SYSTEM }, { role: 'user', content }],
       }),
@@ -1178,7 +1181,7 @@ app.post('/import-recipe', aiQuota, async (req, res) => {
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: VISION_MODEL,
-        max_tokens: 1200,
+        max_completion_tokens: 1200,
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
@@ -1259,7 +1262,7 @@ app.post('/moderate', aiQuota, async (req, res) => {
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        max_tokens: 40,
+        max_completion_tokens: 40,
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: HOUSE_RULES }, { role: 'user', content: text.slice(0, 2000) }],
