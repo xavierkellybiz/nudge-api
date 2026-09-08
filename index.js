@@ -18,6 +18,7 @@
 // Requires Node 18+ (global fetch / FormData / Blob).
 const express = require('express');
 const multer = require('multer');
+const { identify, aiQuota, ipLimit } = require('./guard');
 
 const PORT = process.env.PORT || 8787;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -139,12 +140,17 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: '25mb' }));
+// Plain per-IP ceiling first, so a script can't even reach the secret check at volume.
+app.use(ipLimit());
 // Shared-secret gate (only active when API_SECRET is set). /health stays open for uptime checks.
 app.use((req, res, next) => {
   if (!API_SECRET || req.path === '/health') return next();
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   return res.status(401).json({ error: 'unauthorized' });
 });
+// Then WHO is asking — see guard.js. The AI routes below add aiQuota so each identity is metered;
+// the secret proves the app, the identity meters the person.
+app.use(identify);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 function keyMissing(res) {
@@ -155,7 +161,7 @@ function keyMissing(res) {
 app.get('/health', (_req, res) => res.json({ ok: true, hasKey: !!OPENAI_API_KEY }));
 
 // ── Transcription (Whisper-quality, server-side) ─────────────────────────────
-app.post('/transcribe', upload.single('audio'), async (req, res) => {
+app.post('/transcribe', aiQuota, upload.single('audio'), async (req, res) => {
   if (keyMissing(res)) return;
   try {
     if (!req.file) return res.status(400).json({ error: 'no audio file (field "audio")' });
@@ -176,7 +182,7 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
 });
 
 // ── Vision (photo → structured meal JSON, server-side) ───────────────────────
-app.post('/vision', async (req, res) => {
+app.post('/vision', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     const { base64, mime, correction, previous } = req.body || {};
@@ -866,7 +872,7 @@ async function openaiChatWithRetry(body, tries = 3) {
   }
   return last;
 }
-app.post('/coach', async (req, res) => {
+app.post('/coach', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     const { message, profile, targets, history, image } = req.body || {};
@@ -937,7 +943,7 @@ const EXERCISE_SYSTEM = [
   'Never exceed 23. If the text is not exercise at all, set met 0 and minutes 0.',
 ].join('\n');
 
-app.post('/exercise', async (req, res) => {
+app.post('/exercise', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     const { text, profile } = req.body || {};
@@ -981,7 +987,10 @@ const { estimateMenu } = require('./menu-engine');
 const { locateDishes } = require('./menu-locate');
 const fs = require('fs');
 const MENU_LOG = require('path').join(__dirname, 'menu-debug.log');
-function mlog(...a) { try { fs.appendFileSync(MENU_LOG, `[${new Date().toISOString()}] ${a.map(String).join(' ')}\n`); } catch (e) { /* logging is best-effort */ } }
+// Menu debugging writes what people photographed to disk. That is fine on a laptop and not in
+// production, so it only runs when MENU_DEBUG=1 is set on the host.
+const MENU_DEBUG = process.env.MENU_DEBUG === '1';
+function mlog(...a) { if (!MENU_DEBUG) return; try { fs.appendFileSync(MENU_LOG, `[${new Date().toISOString()}] ${a.map(String).join(' ')}\n`); } catch (e) { /* logging is best-effort */ } }
 // The model is a pure EXTRACTOR — it reads dishes + ingredients + infers grams. It does NOT compute
 // calories or rank (menu-engine.js does all that deterministically from a grounded portion table).
 const MENU_SYSTEM = `You are a menu OCR + ingredient extraction engine. You are given one or more photos of a restaurant menu.
@@ -998,7 +1007,7 @@ Also locate each dish on the photo so the app can show the diner exactly where i
 Return VALID JSON ONLY:
 { "items": [ { "name": "", "portion": "", "page": 1, "box": [0, 0, 0, 0], "ingredients": [ { "name": "", "grams": 0 } ] } ] }`;
 
-app.post('/menu', async (req, res) => {
+app.post('/menu', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     const body = req.body || {};
@@ -1134,7 +1143,7 @@ Return JSON: {"title":string,"servings":number|null,"rawIngredients":string[],"i
 - isRecipe: false if the text is not a food recipe at all.
 - title: the dish name, not the caption's hashtags or hype.`;
 
-app.post('/import-recipe', async (req, res) => {
+app.post('/import-recipe', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     // Two ways in. A `url` we fetch ourselves, or `text` the user pasted by hand — the escape hatch
@@ -1221,7 +1230,7 @@ Answer ONLY with JSON: {"profanity":boolean,"political":boolean}
 - political: partisan politics, elections, parties, politicians, divisive social-political campaigning.
   Ordinary talk about food, diets, health, cost of living or supermarkets is NOT political.`;
 
-app.post('/moderate', async (req, res) => {
+app.post('/moderate', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   const text = String((req.body || {}).text || '').trim();
   if (!text) return res.status(400).json({ error: 'text is required' });
