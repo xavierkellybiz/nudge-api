@@ -1304,16 +1304,26 @@ app.post('/classify', aiQuota, async (req, res) => {
   const name = String(b.name || '').trim().slice(0, 200);
   const brand = String(b.brand || '').trim().slice(0, 80);
   const categories = Array.isArray(b.categories) ? b.categories.slice(0, 12).map(String) : [];
-  // The app sends the list it currently has ideas for, so adding a purpose needs no redeploy here.
-  const purposes = Array.isArray(b.purposes) && b.purposes.length
-    ? b.purposes.slice(0, 40).map(String)
+  // The app sends the list it currently has ideas for, WITH what each one means — bare ids left the
+  // model guessing, and it filed a chocolate soya milk under "soft-drink". Plain strings are still
+  // accepted so an older app build keeps working.
+  const raw = Array.isArray(b.purposes) && b.purposes.length ? b.purposes.slice(0, 40) : [];
+  const defs = raw.map((x) => (typeof x === 'string' ? { id: x, means: '' } : { id: String(x?.id || ''), means: String(x?.means || '') }))
+    .filter((d) => d.id);
+  const purposes = defs.length ? defs.map((d) => d.id)
     : ['sweet-spread', 'ice-cream', 'pasta', 'bread', 'condiment-sweet', 'condiment-creamy',
        'crisps', 'chocolate-bar', 'yoghurt', 'cereal', 'soft-drink', 'dessert', 'biscuits', 'cheese'];
+  const menu = defs.length
+    ? defs.map((d) => (d.means ? `- ${d.id}: ${d.means}` : `- ${d.id}`)).join('\n')
+    : purposes.map((id) => `- ${id}`).join('\n');
   if (!name) return res.status(400).json({ error: 'name is required' });
 
   const system = [
     'You classify a supermarket product by what it is FOR — the job it does for the shopper.',
-    `Reply with exactly one of these ids: ${purposes.join(', ')} — or "none".`,
+    'Choose exactly one id from this list, matching the MEANING given, or answer "none":',
+    menu,
+    'Only pick an id whose meaning genuinely fits. Milk, milk alternatives (soya, oat, almond), juice and',
+    'smoothies are "none" unless an id explicitly describes them — a flavoured milk is not a soft drink.',
     'Answer "none" for whole foods and staples with no obvious lighter substitute (fruit, vegetables,',
     'plain meat, fish, eggs, rice, flour, water, tea, coffee), and for anything that fits no id.',
     'Judge the product itself, not words that happen to appear in its name: a chocolate soya drink is',
@@ -1365,7 +1375,34 @@ app.post('/classify', aiQuota, async (req, res) => {
 
    Costs are bounded the same way as /classify: the app caches per product AND goal, so a given jar
    is asked about once per goal, ever.                                                            */
-const IDEAS_MODEL = process.env.IDEAS_MODEL || 'gpt-4o-mini';
+// gpt-4o-mini ignored the bar in live testing — asked for under 379 kcal/100g, it offered 600 kcal
+// peanut butters. gpt-5.4-mini follows numeric constraints properly. It is a reasoning model, so it
+// takes no temperature and needs room for its reasoning tokens; if that call fails for any reason the
+// route falls back to gpt-4o-mini rather than returning nothing.
+const IDEAS_MODEL = process.env.IDEAS_MODEL || 'gpt-5.4-mini';
+const IDEAS_FALLBACK = process.env.IDEAS_FALLBACK_MODEL || 'gpt-4o-mini';
+
+function ideasBody(model, system, user) {
+  const reasoning = /^(gpt-5|o\d)/.test(model);
+  return {
+    model,
+    ...(reasoning ? { reasoning_effort: 'low', max_completion_tokens: 3000 } : { temperature: 0.2, max_completion_tokens: 500 }),
+    response_format: { type: 'json_object' },
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+  };
+}
+
+async function askIdeas(model, system, user) {
+  const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify(ideasBody(model, system, user)),
+  }, 25000);
+  if (!r.ok) throw new Error(`ideas ${model} ${r.status}`);
+  const txt = (await r.json())?.choices?.[0]?.message?.content || '';
+  const parsed = JSON.parse(txt);            // throws on empty/garbled output → fallback
+  return Array.isArray(parsed?.candidates) ? parsed.candidates : [];
+}
 
 app.post('/swap-ideas', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
@@ -1373,40 +1410,26 @@ app.post('/swap-ideas', aiQuota, async (req, res) => {
   const user = String((req.body || {}).user || '').slice(0, 2000);
   if (!system || !user) return res.status(400).json({ error: 'system and user are required' });
 
+  let candidates = [];
   try {
-    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: IDEAS_MODEL,
-        temperature: 0.2,                 // low, so the same product tends to the same answer
-        max_completion_tokens: 500,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      }),
-    }, 15000);
-    if (!r.ok) return res.status(502).json({ error: 'ideas_failed' });
-
-    const txt = (await r.json())?.choices?.[0]?.message?.content || '';
-    let candidates = [];
-    try { candidates = JSON.parse(txt)?.candidates ?? []; } catch { candidates = []; }
-    if (!Array.isArray(candidates)) candidates = [];
-
-    // Strip any nutrition the model volunteered despite being told not to. The app would ignore it,
-    // but it must never reach a client that might one day trust it.
-    const clean = candidates.slice(0, 6).map((c) => ({
-      name: String(c?.name || '').slice(0, 80),
-      kind: c?.kind === 'diy' ? 'diy' : 'product',
-      components: Array.isArray(c?.components)
-        ? c.components.slice(0, 5).map((x) => ({ food: String(x?.food || '').slice(0, 40), grams: Number(x?.grams) || 0 }))
-        : undefined,
-      why: String(c?.why || '').slice(0, 60),
-    })).filter((c) => c.name);
-
-    return res.json({ candidates: clean });
+    candidates = await askIdeas(IDEAS_MODEL, system, user);
   } catch {
-    return res.status(502).json({ error: 'ideas_failed' });
+    try { candidates = await askIdeas(IDEAS_FALLBACK, system, user); }
+    catch { return res.status(502).json({ error: 'ideas_failed' }); }
   }
+
+  // Strip any nutrition the model volunteered despite being told not to. The app would ignore it,
+  // but it must never reach a client that might one day trust it.
+  const clean = candidates.slice(0, 6).map((c) => ({
+    name: String(c?.name || '').slice(0, 80),
+    kind: c?.kind === 'diy' ? 'diy' : 'product',
+    components: Array.isArray(c?.components)
+      ? c.components.slice(0, 5).map((x) => ({ food: String(x?.food || '').slice(0, 40), grams: Number(x?.grams) || 0 }))
+      : undefined,
+    why: String(c?.why || '').slice(0, 60),
+  })).filter((c) => c.name);
+
+  return res.json({ candidates: clean });
 });
 
 app.listen(PORT, () => console.log(`Food Swap backend listening on :${PORT}  (key ${OPENAI_API_KEY ? 'set' : 'MISSING'})`));
