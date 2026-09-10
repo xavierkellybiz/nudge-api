@@ -1278,4 +1278,135 @@ app.post('/moderate', aiQuota, async (req, res) => {
   res.json({ allowed: reasons.length === 0, reasons });
 });
 
+
+/* ── POST /classify ──────────────────────────────────────────────────────────────────────────────
+   What is this product FOR? Returns exactly one id from a closed list, or "none".
+
+   Add near the other AI routes in index.js (it uses the same helpers: aiQuota, keyMissing,
+   fetchWithTimeout, OPENAI_API_KEY). Set CLASSIFY_MODEL to override the default.
+
+   Why the app calls this at all: Open Food Facts category tags are missing or useless for roughly
+   40% of real UK products — Walkers, McVities, Mr Kipling, Ben & Jerry's and Barilla all come back
+   with no usable English tag, and Nutella's only tag is the top-level "en:snacks". Name matching
+   cannot fill that gap safely, because food words hide inside other words: "cola" lives inside
+   "chocolate", so Alpro Soya Chocolate was being classified as a fizzy drink.
+
+   Deliberately narrow: it classifies, it never advises. One word back. The swap suggestions stay in
+   the app's hand-written tables where they can be unit-tested.
+
+   Cost: the app caches the answer against the barcode forever, because a product's identity does
+   not change. Spend tracks the size of the catalogue people scan, not the number of scans.        */
+const CLASSIFY_MODEL = process.env.CLASSIFY_MODEL || 'gpt-4o-mini';
+
+app.post('/classify', aiQuota, async (req, res) => {
+  if (keyMissing(res)) return;
+  const b = req.body || {};
+  const name = String(b.name || '').trim().slice(0, 200);
+  const brand = String(b.brand || '').trim().slice(0, 80);
+  const categories = Array.isArray(b.categories) ? b.categories.slice(0, 12).map(String) : [];
+  // The app sends the list it currently has ideas for, so adding a purpose needs no redeploy here.
+  const purposes = Array.isArray(b.purposes) && b.purposes.length
+    ? b.purposes.slice(0, 40).map(String)
+    : ['sweet-spread', 'ice-cream', 'pasta', 'bread', 'condiment-sweet', 'condiment-creamy',
+       'crisps', 'chocolate-bar', 'yoghurt', 'cereal', 'soft-drink', 'dessert', 'biscuits', 'cheese'];
+  if (!name) return res.status(400).json({ error: 'name is required' });
+
+  const system = [
+    'You classify a supermarket product by what it is FOR — the job it does for the shopper.',
+    `Reply with exactly one of these ids: ${purposes.join(', ')} — or "none".`,
+    'Answer "none" for whole foods and staples with no obvious lighter substitute (fruit, vegetables,',
+    'plain meat, fish, eggs, rice, flour, water, tea, coffee), and for anything that fits no id.',
+    'Judge the product itself, not words that happen to appear in its name: a chocolate soya drink is',
+    'a drink, not a confectionery; a cheesecake is a dessert, not a cheese; marshmallow fluff is a',
+    'sweet spread. Ignore the brand.',
+    'Reply with JSON only: {"purpose":"<id or none>"}',
+  ].join(' ');
+
+  const user = [
+    `Product: ${name}`,
+    brand ? `Brand: ${brand}` : '',
+    categories.length ? `Categories: ${categories.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+
+  try {
+    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: CLASSIFY_MODEL,
+        temperature: 0,
+        max_completion_tokens: 20,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      }),
+    }, 10000);
+    if (!r.ok) return res.status(502).json({ error: 'classify_failed' });
+
+    const txt = (await r.json())?.choices?.[0]?.message?.content || '';
+    let purpose = null;
+    try { purpose = JSON.parse(txt)?.purpose ?? null; } catch { purpose = null; }
+    // Never pass through something we cannot use — an unknown id would be silently ignored anyway,
+    // and "none" is a real answer worth caching.
+    if (purpose !== 'none' && !purposes.includes(purpose)) purpose = 'none';
+    return res.json({ purpose });
+  } catch {
+    return res.status(502).json({ error: 'classify_failed' });
+  }
+});
+
+/* ── POST /swap-ideas ────────────────────────────────────────────────────────────────────────────
+   Generated swap CANDIDATES. The app composes the prompt (src/lib/swap-prompt.ts) so the wording is
+   tailored to the product, the user's goal and the exact number the swap has to beat; this route
+   just relays it and enforces the shape.
+
+   The model returns NAMES ONLY — never calories or protein. The app prices every suggestion against
+   Open Food Facts and USDA and discards whatever it cannot price, so a hallucinated product
+   vanishes instead of showing an invented figure beside real label data.
+
+   Costs are bounded the same way as /classify: the app caches per product AND goal, so a given jar
+   is asked about once per goal, ever.                                                            */
+const IDEAS_MODEL = process.env.IDEAS_MODEL || 'gpt-4o-mini';
+
+app.post('/swap-ideas', aiQuota, async (req, res) => {
+  if (keyMissing(res)) return;
+  const system = String((req.body || {}).system || '').slice(0, 4000);
+  const user = String((req.body || {}).user || '').slice(0, 2000);
+  if (!system || !user) return res.status(400).json({ error: 'system and user are required' });
+
+  try {
+    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: IDEAS_MODEL,
+        temperature: 0.2,                 // low, so the same product tends to the same answer
+        max_completion_tokens: 500,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      }),
+    }, 15000);
+    if (!r.ok) return res.status(502).json({ error: 'ideas_failed' });
+
+    const txt = (await r.json())?.choices?.[0]?.message?.content || '';
+    let candidates = [];
+    try { candidates = JSON.parse(txt)?.candidates ?? []; } catch { candidates = []; }
+    if (!Array.isArray(candidates)) candidates = [];
+
+    // Strip any nutrition the model volunteered despite being told not to. The app would ignore it,
+    // but it must never reach a client that might one day trust it.
+    const clean = candidates.slice(0, 6).map((c) => ({
+      name: String(c?.name || '').slice(0, 80),
+      kind: c?.kind === 'diy' ? 'diy' : 'product',
+      components: Array.isArray(c?.components)
+        ? c.components.slice(0, 5).map((x) => ({ food: String(x?.food || '').slice(0, 40), grams: Number(x?.grams) || 0 }))
+        : undefined,
+      why: String(c?.why || '').slice(0, 60),
+    })).filter((c) => c.name);
+
+    return res.json({ candidates: clean });
+  } catch {
+    return res.status(502).json({ error: 'ideas_failed' });
+  }
+});
+
 app.listen(PORT, () => console.log(`Food Swap backend listening on :${PORT}  (key ${OPENAI_API_KEY ? 'set' : 'MISSING'})`));
