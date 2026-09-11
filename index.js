@@ -99,6 +99,13 @@ seasoning for sodium. If a dish gives you no reasonable basis for one of them, r
 field. NULL IS THE CORRECT ANSWER when you do not know: it is recorded as "unknown" and left out of
 the user's daily total, whereas 0 asserts the meal contained none of it and under-reports their day.
 
+PACKAGED PRODUCTS: if the photo shows a packaged product — a jar, tub, box, bottle, packet or can —
+rather than food on a plate, name it by its BRAND and product name exactly as printed on the pack,
+e.g. "Hellmann's Real Mayonnaise", "Tesco Bran Flakes", "Barilla Spaghetti No.5". This includes
+supermarket own brands (Tesco, Sainsbury's, Asda, Aldi, Lidl, M&S, Morrisons, Waitrose, Co-op) when
+they are visible. Use that name for both original.name and the component. Never invent a brand you
+cannot see; if no brand is visible, describe the product plainly. Keep "portion" under 60 characters.
+
 Return JSON only. No markdown. No commentary. Use exactly this shape:
 
 {
