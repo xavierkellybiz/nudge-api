@@ -26,6 +26,21 @@ const DAILY = Number(process.env.AI_DAILY_LIMIT || 60);
 const ANON_HOURLY = Number(process.env.AI_ANON_HOURLY_LIMIT || 10);
 const ANON_DAILY = Number(process.env.AI_ANON_DAILY_LIMIT || 20);
 
+// Helper calls — the small, cheap model calls a grocery scan makes AFTER the photo is read (/classify,
+// /swap-ideas). Metered in their own bucket: counted with the photo reads, one grocery scan cost up to
+// three calls, so a shopper was out of scans after eight new products in an hour. They still have a
+// ceiling, because they still cost money.
+const HELPER_HOURLY = Number(process.env.AI_HELPER_HOURLY_LIMIT || 60);
+const HELPER_DAILY = Number(process.env.AI_HELPER_DAILY_LIMIT || 200);
+const HELPER_ANON_HOURLY = Number(process.env.AI_HELPER_ANON_HOURLY_LIMIT || 30);
+const HELPER_ANON_DAILY = Number(process.env.AI_HELPER_ANON_DAILY_LIMIT || 80);
+
+// Plain request ceilings. Per IP it has to be generous: a mobile carrier puts many phones behind one
+// address, and one grocery scan makes a dozen requests (read, classify, ideas, then a food lookup per
+// ingredient to price them). Per identity — known once the caller is identified — it can be tighter.
+const IP_MAX_15M = Number(process.env.IP_LIMIT_15M || 1500);
+const IDENTITY_MAX_15M = Number(process.env.IDENTITY_LIMIT_15M || 400);
+
 /* ── Token verification, cached ──────────────────────────────────────────── */
 const tokenCache = new Map();          // token → { uid, until }
 const TOKEN_TTL = 10 * 60 * 1000;
@@ -82,23 +97,30 @@ setInterval(() => {
   for (const [k, arr] of hits) { const keep = arr.filter((t) => now - t < 24 * 3600 * 1000); if (keep.length) hits.set(k, keep); else hits.delete(k); }
 }, 15 * 60 * 1000).unref?.();
 
-/** Meter an AI route: 429 with a Retry-After when the caller is over their allowance. */
-function aiQuota(req, res, next) {
-  const id = req.identity || { key: `ip:${clientIp(req)}`, verified: false };
-  const hourly = id.verified ? HOURLY : ANON_HOURLY;
-  const daily = id.verified ? DAILY : ANON_DAILY;
-  const h = count(`${id.key}:h`, 3600 * 1000).length;
-  const d = count(`${id.key}:d`, 24 * 3600 * 1000).length;
-  if (h >= hourly || d >= daily) {
-    res.set('Retry-After', String(h >= hourly ? 3600 : 6 * 3600));
-    return res.status(429).json({ error: 'quota', message: 'You have hit the limit for now. Please try again later.' });
-  }
-  record(`${id.key}:h`); record(`${id.key}:d`);
-  next();
+/** Meter an AI route in a bucket: 429 with a Retry-After when the caller is over that allowance. */
+function meter(bucket, limits) {
+  return (req, res, next) => {
+    const id = req.identity || { key: `ip:${clientIp(req)}`, verified: false };
+    const hourly = id.verified ? limits.hourly : limits.anonHourly;
+    const daily = id.verified ? limits.daily : limits.anonDaily;
+    const k = `${id.key}${bucket}`;
+    const h = count(`${k}:h`, 3600 * 1000).length;
+    const d = count(`${k}:d`, 24 * 3600 * 1000).length;
+    if (h >= hourly || d >= daily) {
+      res.set('Retry-After', String(h >= hourly ? 3600 : 6 * 3600));
+      return res.status(429).json({ error: 'quota', message: 'You have hit the limit for now. Please try again later.' });
+    }
+    record(`${k}:h`); record(`${k}:d`);
+    next();
+  };
 }
+/** Photo reads, the coach, menus — the main AI allowance. (Bucket '' keeps the original counter keys.) */
+const aiQuota = meter('', { hourly: HOURLY, daily: DAILY, anonHourly: ANON_HOURLY, anonDaily: ANON_DAILY });
+/** The cheap follow-up calls a grocery scan makes. Separate so they can't use up photo scans. */
+const helperQuota = meter(':helper', { hourly: HELPER_HOURLY, daily: HELPER_DAILY, anonHourly: HELPER_ANON_HOURLY, anonDaily: HELPER_ANON_DAILY });
 
 /** Plain per-IP request ceiling for everything, so a script can't hammer even cheap routes. */
-function ipLimit({ windowMs = 15 * 60 * 1000, max = 300 } = {}) {
+function ipLimit({ windowMs = 15 * 60 * 1000, max = IP_MAX_15M } = {}) {
   return (req, res, next) => {
     if (req.path === '/health') return next();
     const key = `ipall:${clientIp(req)}`;
@@ -108,4 +130,15 @@ function ipLimit({ windowMs = 15 * 60 * 1000, max = 300 } = {}) {
   };
 }
 
-module.exports = { identify, aiQuota, ipLimit };
+/** Per-identity request ceiling for every route, applied after identify(). */
+function identityLimit({ windowMs = 15 * 60 * 1000, max = IDENTITY_MAX_15M } = {}) {
+  return (req, res, next) => {
+    if (req.path === '/health' || !req.identity) return next();
+    const key = `idall:${req.identity.key}`;
+    if (count(key, windowMs).length >= max) { res.set('Retry-After', String(Math.ceil(windowMs / 1000))); return res.status(429).json({ error: 'rate_limited' }); }
+    record(key);
+    next();
+  };
+}
+
+module.exports = { identify, aiQuota, helperQuota, ipLimit, identityLimit };

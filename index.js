@@ -18,7 +18,7 @@
 // Requires Node 18+ (global fetch / FormData / Blob).
 const express = require('express');
 const multer = require('multer');
-const { identify, aiQuota, ipLimit } = require('./guard');
+const { identify, aiQuota, helperQuota, ipLimit, identityLimit } = require('./guard');
 
 const PORT = process.env.PORT || 8787;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -151,6 +151,7 @@ app.use((req, res, next) => {
 // Then WHO is asking — see guard.js. The AI routes below add aiQuota so each identity is metered;
 // the secret proves the app, the identity meters the person.
 app.use(identify);
+app.use(identityLimit());
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 function keyMissing(res) {
@@ -1298,7 +1299,7 @@ app.post('/moderate', aiQuota, async (req, res) => {
    not change. Spend tracks the size of the catalogue people scan, not the number of scans.        */
 const CLASSIFY_MODEL = process.env.CLASSIFY_MODEL || 'gpt-4o-mini';
 
-app.post('/classify', aiQuota, async (req, res) => {
+app.post('/classify', helperQuota, async (req, res) => {
   if (keyMissing(res)) return;
   const b = req.body || {};
   const name = String(b.name || '').trim().slice(0, 200);
@@ -1404,7 +1405,7 @@ async function askIdeas(model, system, user) {
   return Array.isArray(parsed?.candidates) ? parsed.candidates : [];
 }
 
-app.post('/swap-ideas', aiQuota, async (req, res) => {
+app.post('/swap-ideas', helperQuota, async (req, res) => {
   if (keyMissing(res)) return;
   const system = String((req.body || {}).system || '').slice(0, 4000);
   const user = String((req.body || {}).user || '').slice(0, 2000);
