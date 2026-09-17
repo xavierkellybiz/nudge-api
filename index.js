@@ -1246,14 +1246,25 @@ Answer ONLY with JSON: {"profanity":boolean,"political":boolean}
 app.post('/moderate', helperQuota, async (req, res) => {
   if (keyMissing(res)) return;
   const text = String((req.body || {}).text || '').trim();
-  if (!text) return res.status(400).json({ error: 'text is required' });
+  // Chat photos are screened too (App Store 1.2: user-generated content includes images). Only a
+  // photo already uploaded to this project's group-media bucket is accepted — this route must not
+  // become a way to run moderation, at our cost, on arbitrary URLs.
+  const imageUrl = String((req.body || {}).imageUrl || '').trim();
+  const MEDIA_PREFIX = `${(process.env.SUPABASE_URL || 'https://txtubyeityavfihabmma.supabase.co').replace(/\/$/, '')}/storage/v1/object/public/group-media/`;
+  if (imageUrl && !imageUrl.startsWith(MEDIA_PREFIX)) return res.status(400).json({ error: 'imageUrl must be a group-media upload' });
+  if (!text && !imageUrl) return res.status(400).json({ error: 'text or imageUrl is required' });
+
+  const input = [
+    ...(text ? [{ type: 'text', text: text.slice(0, 4000) }] : []),
+    ...(imageUrl ? [{ type: 'image_url', image_url: { url: imageUrl } }] : []),
+  ];
 
   const reasons = [];
   try {
     const r = await fetchWithTimeout('https://api.openai.com/v1/moderations', {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({ model: 'omni-moderation-latest', input: text.slice(0, 4000) }),
+      body: JSON.stringify({ model: 'omni-moderation-latest', input }),
     }, 12000);
     if (!r.ok) throw new Error(`moderation ${r.status}`);
     const cats = (await r.json())?.results?.[0]?.categories || {};
@@ -1266,7 +1277,7 @@ app.post('/moderate', helperQuota, async (req, res) => {
     return res.json({ allowed: false, reasons: ['unavailable'] });
   }
 
-  try {
+  if (text) try {
     const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
