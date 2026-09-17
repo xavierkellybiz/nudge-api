@@ -5,8 +5,10 @@
 // account. This module gives every request an identity and meters the expensive routes:
 //
 //   identity  Supabase access token (Authorization: Bearer …), verified against Supabase itself —
-//             the server never trusts the token's claims unchecked. Falls back to the app's
-//             per-install id header, then to the IP.
+//             the server never trusts the token's claims unchecked. Without a verified token the
+//             caller is identified by IP ONLY. The app's x-install-id header used to be accepted
+//             as an identity, but a caller picks its own value, so a fresh id per request reset
+//             the allowance every time. Every current app build sends a token.
 //   metering  a rolling hourly and daily count of AI calls per identity, plus a plain per-IP
 //             request limit. Limits are generous for a person and tiny for a script.
 //
@@ -39,6 +41,10 @@ const HELPER_ANON_DAILY = Number(process.env.AI_HELPER_ANON_DAILY_LIMIT || 80);
 // address, and one grocery scan makes a dozen requests (read, classify, ideas, then a food lookup per
 // ingredient to price them). Per identity — known once the caller is identified — it can be tighter.
 const IP_MAX_15M = Number(process.env.IP_LIMIT_15M || 1500);
+// AI calls per IP across ALL identities. Anonymous Supabase accounts are free to mint, so a per-user
+// allowance alone lets a script rotate accounts; this caps what one address can spend in an hour.
+// Generous enough for many real phones behind one carrier address.
+const IP_AI_HOURLY = Number(process.env.IP_AI_HOURLY_LIMIT || 200);
 const IDENTITY_MAX_15M = Number(process.env.IDENTITY_LIMIT_15M || 400);
 
 /* ── Token verification, cached ──────────────────────────────────────────── */
@@ -71,15 +77,19 @@ async function identify(req, _res, next) {
   const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   let uid = token ? await verifySupabaseToken(token) : null;
   if (uid) { req.identity = { key: `u:${uid}`, verified: true }; return next(); }
-  const install = String(req.headers['x-install-id'] || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64);
-  if (install) { req.identity = { key: `i:${install}`, verified: false }; return next(); }
   req.identity = { key: `ip:${clientIp(req)}`, verified: false };
   next();
 }
 
+// The caller's real address. Render is fronted by Cloudflare (responses carry cf-ray), and Cloudflare
+// OVERWRITES cf-connecting-ip with the address that actually connected — a client can't forge it.
+// The FIRST x-forwarded-for entry, which this used before, is whatever the client chose to send, so
+// a spoofed header gave every request a fresh "IP" and a fresh limit.
 function clientIp(req) {
-  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return xf || req.ip || req.socket?.remoteAddress || 'unknown';
+  const cf = String(req.headers['cf-connecting-ip'] || '').trim();
+  if (cf) return cf;
+  const chain = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return chain[chain.length - 1] || req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
 /* ── Rolling counters ────────────────────────────────────────────────────── */
@@ -106,18 +116,21 @@ function meter(bucket, limits) {
     const k = `${id.key}${bucket}`;
     const h = count(`${k}:h`, 3600 * 1000).length;
     const d = count(`${k}:d`, 24 * 3600 * 1000).length;
-    if (h >= hourly || d >= daily) {
-      res.set('Retry-After', String(h >= hourly ? 3600 : 6 * 3600));
+    const ipKey = `ipai:${clientIp(req)}${bucket}`;
+    const ipH = limits.ipHourly ? count(ipKey, 3600 * 1000).length : 0;
+    if (h >= hourly || d >= daily || (limits.ipHourly && ipH >= limits.ipHourly)) {
+      res.set('Retry-After', String(h >= hourly || ipH >= (limits.ipHourly || Infinity) ? 3600 : 6 * 3600));
       return res.status(429).json({ error: 'quota', message: 'You have hit the limit for now. Please try again later.' });
     }
     record(`${k}:h`); record(`${k}:d`);
+    if (limits.ipHourly) record(ipKey);
     next();
   };
 }
 /** Photo reads, the coach, menus — the main AI allowance. (Bucket '' keeps the original counter keys.) */
-const aiQuota = meter('', { hourly: HOURLY, daily: DAILY, anonHourly: ANON_HOURLY, anonDaily: ANON_DAILY });
+const aiQuota = meter('', { hourly: HOURLY, daily: DAILY, anonHourly: ANON_HOURLY, anonDaily: ANON_DAILY, ipHourly: IP_AI_HOURLY });
 /** The cheap follow-up calls a grocery scan makes. Separate so they can't use up photo scans. */
-const helperQuota = meter(':helper', { hourly: HELPER_HOURLY, daily: HELPER_DAILY, anonHourly: HELPER_ANON_HOURLY, anonDaily: HELPER_ANON_DAILY });
+const helperQuota = meter(':helper', { hourly: HELPER_HOURLY, daily: HELPER_DAILY, anonHourly: HELPER_ANON_HOURLY, anonDaily: HELPER_ANON_DAILY, ipHourly: IP_AI_HOURLY * 3 });
 
 /** Plain per-IP request ceiling for everything, so a script can't hammer even cheap routes. */
 function ipLimit({ windowMs = 15 * 60 * 1000, max = IP_MAX_15M } = {}) {

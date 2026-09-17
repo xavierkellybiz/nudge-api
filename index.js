@@ -1241,7 +1241,9 @@ Answer ONLY with JSON: {"profanity":boolean,"political":boolean}
 - political: partisan politics, elections, parties, politicians, divisive social-political campaigning.
   Ordinary talk about food, diets, health, cost of living or supermarkets is NOT political.`;
 
-app.post('/moderate', aiQuota, async (req, res) => {
+// Helper bucket, not the main allowance: a chatty group member must never be locked out of scanning
+// meals by their own messages, and a moderation 429 now blocks the post (the app fails closed).
+app.post('/moderate', helperQuota, async (req, res) => {
   if (keyMissing(res)) return;
   const text = String((req.body || {}).text || '').trim();
   if (!text) return res.status(400).json({ error: 'text is required' });
