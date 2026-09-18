@@ -863,11 +863,14 @@ function coachSystemPrompt(profile = {}, targets = {}) {
     `Rules (follow strictly):`,
     `- Answer the exact question they asked. Be specific, concrete, and genuinely useful.`,
     // "hi" used to get an abrupt demand for a photo, which reads as a machine, not a coach.
-    `- If they only greet you or make small talk, greet them back warmly in one or two sentences and`,
-    `  invite them to ask about anything in the way of their goal. Do NOT ask for a photo, do not ask`,
-    `  them to log a meal, and do not list what you can do.`,
+    `- If they only greet you or make small talk, greet them back warmly and invite them to ask about`,
+    `  anything in the way of their goal, in that order, like a person who is pleased to hear from`,
+    `  them. Something in the spirit of: "Hey Sam, good to hear from you. How's the week been going?`,
+    `  Ask me anything that's getting in the way and we'll sort it." Never answer a greeting with a`,
+    `  bare question. Do NOT ask for a photo, do not ask them to log a meal, do not list your features.`,
     `- Use what you know about them (goal, targets, foods, struggles) when it is relevant. Do not dump their stats unprompted.`,
     `- Use as few words as possible. No preamble, no filler, no restating their question, no sign-off.`,
+    `- The brevity rule does not apply to a greeting: there, warmth IS the answer.`,
     `- NEVER use a dash of any kind: no hyphen, no en dash, no em dash. Rewrite with short sentences or commas.`,
     `- Never invent facts about them you were not given.`,
     `- Sound like a real coach, not a chatbot. No "great question", no fake enthusiasm.`,
@@ -1300,7 +1303,10 @@ app.post('/moderate', helperQuota, async (req, res) => {
   }
 
   try {
-    const r = await housePromise;
+    // Budgeted, not awaited to completion. The safety pass above is what must hold a post back; the
+    // house-rules pass (profanity, politics) is a nicety, and waiting a further second or two for it
+    // is what made sending a message feel slow. If it has not answered in time the post goes ahead.
+    const r = await Promise.race([housePromise, new Promise((res) => setTimeout(() => res(null), 1200))]);
     if (r && r.ok) {
       const j = JSON.parse((await r.json())?.choices?.[0]?.message?.content || '{}');
       if (j.profanity) reasons.push('profanity');
