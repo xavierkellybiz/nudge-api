@@ -850,8 +850,11 @@ function coachSystemPrompt(profile = {}, targets = {}) {
   if (Array.isArray(p.struggles) && p.struggles.length) f.push(`Has struggled with: ${p.struggles.join(', ')}`);
   if (Array.isArray(p.pastAttempts) && p.pastAttempts.length) f.push(`Tried before: ${p.pastAttempts.join(', ')}`);
   const tone = TONE_MAP[p.coachTone] || 'Warm, practical, and direct.';
+  // The coach has a NAME the person chose in onboarding (Sofia, Alex, Maya, Jordan). Answering as
+  // "Nudge" was both the old brand and nobody they picked.
+  const name = typeof p.coachName === 'string' && p.coachName.trim() ? p.coachName.trim().slice(0, 20) : 'your coach';
   return [
-    `You are Nudge, this person's personal nutrition and fitness coach inside their app.`,
+    `You are ${name}, this person's personal nutrition coach inside their app, Easy.`,
     `Tone to speak in: ${tone}`,
     ``,
     `What you know about them:`,
@@ -859,6 +862,10 @@ function coachSystemPrompt(profile = {}, targets = {}) {
     ``,
     `Rules (follow strictly):`,
     `- Answer the exact question they asked. Be specific, concrete, and genuinely useful.`,
+    // "hi" used to get an abrupt demand for a photo, which reads as a machine, not a coach.
+    `- If they only greet you or make small talk, greet them back warmly in one or two sentences and`,
+    `  invite them to ask about anything in the way of their goal. Do NOT ask for a photo, do not ask`,
+    `  them to log a meal, and do not list what you can do.`,
     `- Use what you know about them (goal, targets, foods, struggles) when it is relevant. Do not dump their stats unprompted.`,
     `- Use as few words as possible. No preamble, no filler, no restating their question, no sign-off.`,
     `- NEVER use a dash of any kind: no hyphen, no en dash, no em dash. Rewrite with short sentences or commas.`,
@@ -1259,6 +1266,21 @@ app.post('/moderate', helperQuota, async (req, res) => {
     ...(imageUrl ? [{ type: 'image_url', image_url: { url: imageUrl } }] : []),
   ];
 
+  // The safety pass and the house-rules pass are started TOGETHER. Run one after the other, each
+  // waiting on its own OpenAI round trip, they made sending a chat message feel sluggish for no
+  // reason: neither depends on the other's answer.
+  const housePromise = text ? fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      max_completion_tokens: 40,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: HOUSE_RULES }, { role: 'user', content: text.slice(0, 2000) }],
+    }),
+  }, 12000).catch(() => null) : null;
+
   const reasons = [];
   try {
     const r = await fetchWithTimeout('https://api.openai.com/v1/moderations', {
@@ -1277,19 +1299,9 @@ app.post('/moderate', helperQuota, async (req, res) => {
     return res.json({ allowed: false, reasons: ['unavailable'] });
   }
 
-  if (text) try {
-    const r = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        max_completion_tokens: 40,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: HOUSE_RULES }, { role: 'user', content: text.slice(0, 2000) }],
-      }),
-    }, 12000);
-    if (r.ok) {
+  try {
+    const r = await housePromise;
+    if (r && r.ok) {
       const j = JSON.parse((await r.json())?.choices?.[0]?.message?.content || '{}');
       if (j.profanity) reasons.push('profanity');
       if (j.political) reasons.push('political');
