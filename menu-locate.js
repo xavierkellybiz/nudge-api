@@ -107,16 +107,25 @@ function score(name, line) {
   return recall * 0.75 + precision * 0.25;
 }
 
-/**
- * items: model output [{ name, page, box }], pages: [{ base64 }]. Mutates each item: on a confident
- * OCR match sets box (0–1000) + box_source 'ocr'; otherwise leaves the model box, box_source 'model'.
- */
-async function locateDishes(items, pages, log) {
+/** OCR every page once. Start this while the model is reading, then hand the result to
+ *  locateDishes — an OCR pass is the slowest thing in the request on the small production CPU,
+ *  and re-running it after the model came back doubled the wait for no new information. */
+async function ocrPages(pages, log) {
   const ocr = [];
   for (let i = 0; i < pages.length; i++) {
     try { ocr[i] = await ocrPage(pages[i].base64); }
     catch (e) { ocr[i] = null; if (log) log('ocr failed on page', i + 1, String(e && e.message || e)); }
   }
+  return ocr;
+}
+
+/**
+ * items: model output [{ name, page, box }], pages: [{ base64 }]. Mutates each item: on a confident
+ * OCR match sets box (0–1000) + box_source 'ocr'; otherwise leaves the model box, box_source 'model'.
+ * `ocr` is the result of ocrPages(pages) when the caller already has it; otherwise it is computed here.
+ */
+async function locateDishes(items, pages, log, ocr) {
+  if (!Array.isArray(ocr)) ocr = await ocrPages(pages, log);
   const usedLines = new Set();
   for (const it of items) {
     it.box_source = it.box ? 'model' : undefined;
@@ -191,4 +200,4 @@ async function locateDishes(items, pages, log) {
   return items;
 }
 
-module.exports = { locateDishes, ocrPage, score };
+module.exports = { locateDishes, ocrPages, ocrPage, score };

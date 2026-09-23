@@ -1005,7 +1005,7 @@ app.post('/exercise', aiQuota, async (req, res) => {
 // ── Menu (photo of a menu → ingredient-reasoned dishes + goal-ranked top 3) ───
 const MENU_MODEL = process.env.MENU_MODEL || VISION_MODEL;
 const { estimateMenu } = require('./menu-engine');
-const { locateDishes } = require('./menu-locate');
+const { locateDishes, ocrPages } = require('./menu-locate');
 const fs = require('fs');
 const MENU_LOG = require('path').join(__dirname, 'menu-debug.log');
 // Menu debugging writes what people photographed to disk. That is fine on a laptop and not in
@@ -1045,7 +1045,7 @@ app.post('/menu', aiQuota, async (req, res) => {
 
     // OCR the pages in parallel with the model read — it's how each dish gets snapped to its exact
     // printed line (menu-locate.js); the model's own box is only the fallback.
-    const ocrWarm = locateDishes([], images, mlog).catch(() => null);
+    const ocrWarm = ocrPages(images, mlog).catch(() => null);
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -1077,8 +1077,10 @@ app.post('/menu', aiQuota, async (req, res) => {
     }
     const modelItems = Array.isArray(parsed.items) ? parsed.items : [];
     mlog('extracted', modelItems.length, 'dishes from model. Locating each on the page, then computing ingredient-summed calories:');
-    await ocrWarm;
-    try { await locateDishes(modelItems, images, mlog); } catch (e) { mlog('locate failed (keeping model boxes):', String(e && e.message || e)); }
+    // The OCR that ran alongside the model — never OCR a page a second time here; that pass alone
+    // was ~20s of the request on production, on top of the model's own ~27s.
+    const ocr = await ocrWarm;
+    try { await locateDishes(modelItems, images, mlog, ocr || undefined); } catch (e) { mlog('locate failed (keeping model boxes):', String(e && e.message || e)); }
     const result = estimateMenu(modelItems, g, mlog);   // <-- deterministic engine does all the math + ranking
     mlog('computed', result.items.length, 'items; TOP3:', result.top.map((t) => `${t.name} (${t.calorie_low}-${t.calorie_high})`).join(' | '), '\n');
     res.json({ ...result, pagesRead: images.length, dishesFound: modelItems.length });
