@@ -242,7 +242,8 @@ app.post('/vision', aiQuota, async (req, res) => {
 });
 
 // ── Food search (USDA FoodData Central) ──────────────────────────────────────
-// GET /food-search?q=chicken → { foods: [{ name, brand, serving, calories, protein, carbs, fats }] }
+// GET /food-search?q=chicken → { foods: [{ name, brand, serving, calories, protein, carbs, fats,
+//                                          fiberG?, sugarG?, sodiumMg? }] }
 // Free API; set FDC_API_KEY for higher rate limits (DEMO_KEY works for light testing).
 const FDC_API_KEY = process.env.FDC_API_KEY || 'DEMO_KEY';
 
@@ -272,6 +273,10 @@ function perServing(food) {
   const grams = food.servingGrams || servingGrams(food.serving);
   if (!grams) return { ...food, serving: '100 g' };   // no usable weight: be honest, say 100 g
   const k = grams / 100;
+  const scaled = (value, whole = false) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+    return whole ? Math.round(value * k) : Math.round(value * k * 10) / 10;
+  };
   return {
     ...food,
     serving: String(food.serving).trim(),
@@ -280,6 +285,9 @@ function perServing(food) {
     protein: Math.round(food.protein * k),
     carbs: Math.round(food.carbs * k),
     fats: Math.round(food.fats * k),
+    fiberG: scaled(food.fiberG),
+    sugarG: scaled(food.sugarG),
+    sodiumMg: scaled(food.sodiumMg, true),
   };
 }
 
@@ -287,6 +295,16 @@ function fdcNutrient(food, id) {
   const n = (food.foodNutrients || []).find((x) => (x.nutrientId ?? x.nutrient?.id) === id);
   const v = n?.value ?? n?.amount ?? 0;
   return typeof v === 'number' && isFinite(v) ? v : 0;
+}
+// Unlike calories/macros, these values are legitimately absent from many catalogue rows. Returning
+// undefined (rather than 0) preserves the difference between “not reported” and “contains none”.
+function optionalFdcNutrient(food, ids) {
+  for (const id of ids) {
+    const n = (food.foodNutrients || []).find((x) => (x.nutrientId ?? x.nutrient?.id) === id);
+    const v = n?.value ?? n?.amount;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return undefined;
 }
 function normalizeFdcFood(food) {
   const name = String(food.description || '').trim().replace(/\s+/g, ' ');
@@ -304,6 +322,10 @@ function normalizeFdcFood(food) {
     protein: Math.round(fdcNutrient(food, 1003)),    // Protein
     carbs: Math.round(fdcNutrient(food, 1005)),      // Carbohydrate
     fats: Math.round(fdcNutrient(food, 1004)),       // Total lipid (fat)
+    fiberG: optionalFdcNutrient(food, [1079]),        // Fibre, total dietary (g)
+    // 2000 = Total sugars; 1063 is retained as a fallback for older/alternate FDC records.
+    sugarG: optionalFdcNutrient(food, [2000, 1063]),
+    sodiumMg: optionalFdcNutrient(food, [1093]),      // Sodium (mg)
   };
 }
 // ── Household portions ───────────────────────────────────────────────────────
@@ -479,6 +501,15 @@ function normalizeOffFood(p) {
   if (!kcal || !isFinite(kcal)) return null;
   // cgi returns brands as a comma string, search-a-licious as an array.
   const brand = (Array.isArray(p.brands) ? p.brands[0] : String(p.brands || '').split(',')[0] || '').trim();
+  const optionalNumber = (value) => {
+    if (value == null || value === '') return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const fiberG = optionalNumber(n.fiber_100g);
+  const sugarG = optionalNumber(n.sugars_100g);
+  // Open Food Facts normalises sodium to grams per 100 g; the app ledger stores milligrams.
+  const sodiumG = optionalNumber(n.sodium_100g);
   return {
     name: name.length > 60 ? name.slice(0, 60) : name,
     brand,
@@ -487,6 +518,9 @@ function normalizeOffFood(p) {
     protein: Math.round(Number(n.proteins_100g) || 0),
     carbs: Math.round(Number(n.carbohydrates_100g) || 0),
     fats: Math.round(Number(n.fat_100g) || 0),
+    fiberG: fiberG == null ? undefined : Math.round(fiberG * 10) / 10,
+    sugarG: sugarG == null ? undefined : Math.round(sugarG * 10) / 10,
+    sodiumMg: sodiumG == null ? undefined : Math.round(sodiumG * 1000),
     source: 'off',
   };
 }
