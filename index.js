@@ -18,7 +18,7 @@
 // Requires Node 18+ (global fetch / FormData / Blob).
 const express = require('express');
 const multer = require('multer');
-const { identify, aiQuota, helperQuota, ipLimit, identityLimit } = require('./guard');
+const { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit } = require('./guard');
 
 const PORT = process.env.PORT || 8787;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -1062,7 +1062,7 @@ Also locate each dish on the photo so the app can show the diner exactly where i
 Return VALID JSON ONLY:
 { "items": [ { "name": "", "portion": "", "page": 1, "box": [0, 0, 0, 0], "ingredients": [ { "name": "", "grams": 0 } ] } ] }`;
 
-app.post('/menu', aiQuota, async (req, res) => {
+app.post('/menu', menuQuota, aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
     const body = req.body || {};

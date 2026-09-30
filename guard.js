@@ -19,10 +19,14 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://txtubyeityavfihabmma.s
 // Supabase "whose token is this?", which is exactly what it's for. Override on the host if it rotates.
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR4dHVieWVpdHlhdmZpaGFibW1hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY0OTQyMzgsImV4cCI6MjEwMjA3MDIzOH0.rYX72kpZmHamy4Ps_5MMLReMSo8aKQPWL2lG-eN1HYg';
 
-// AI calls per identity. A heavy real user logs maybe 15 meals a day; 60 is far beyond that and
-// still caps a leaked secret at a few dollars a day instead of an open tab.
+// AI calls per identity. A heavy real user logs maybe 15 meals a day.
+//
+// 30, not 60. A photo read costs about $0.009, and a subscription is $89/year — $7.42 a month — so
+// break-even is roughly 28 reads a day, every day. At 60 an identity sitting on the ceiling cost
+// more than twice what it paid; 30 is still double what any real person logs and stays the right
+// side of the line.
 const HOURLY = Number(process.env.AI_HOURLY_LIMIT || 25);
-const DAILY = Number(process.env.AI_DAILY_LIMIT || 60);
+const DAILY = Number(process.env.AI_DAILY_LIMIT || 30);
 // Identities without a verified user get a tighter ceiling: they are a race on first launch, or
 // someone who chose not to send a token.
 const ANON_HOURLY = Number(process.env.AI_ANON_HOURLY_LIMIT || 10);
@@ -36,6 +40,16 @@ const HELPER_HOURLY = Number(process.env.AI_HELPER_HOURLY_LIMIT || 60);
 const HELPER_DAILY = Number(process.env.AI_HELPER_DAILY_LIMIT || 200);
 const HELPER_ANON_HOURLY = Number(process.env.AI_HELPER_ANON_HOURLY_LIMIT || 30);
 const HELPER_ANON_DAILY = Number(process.env.AI_HELPER_ANON_DAILY_LIMIT || 80);
+
+// Menus are the expensive route and the flat allowance did not know it: /menu reads several pages
+// at high detail and answers up to 8000 tokens, so one costs about $0.032 — roughly 3.5x a photo
+// read and 36x a food search. Counted with photo reads, an identity could spend four times a
+// subscriber's monthly revenue in a day on this route alone. Nobody photographs five menus a day,
+// so the ceiling is invisible to a real person and closed to everyone else.
+const MENU_HOURLY = Number(process.env.AI_MENU_HOURLY_LIMIT || 3);
+const MENU_DAILY = Number(process.env.AI_MENU_DAILY_LIMIT || 5);
+const MENU_ANON_HOURLY = Number(process.env.AI_MENU_ANON_HOURLY_LIMIT || 2);
+const MENU_ANON_DAILY = Number(process.env.AI_MENU_ANON_DAILY_LIMIT || 3);
 
 // Plain request ceilings. Per IP it has to be generous: a mobile carrier puts many phones behind one
 // address, and one grocery scan makes a dozen requests (read, classify, ideas, then a food lookup per
@@ -131,6 +145,8 @@ function meter(bucket, limits) {
 const aiQuota = meter('', { hourly: HOURLY, daily: DAILY, anonHourly: ANON_HOURLY, anonDaily: ANON_DAILY, ipHourly: IP_AI_HOURLY });
 /** The cheap follow-up calls a grocery scan makes. Separate so they can't use up photo scans. */
 const helperQuota = meter(':helper', { hourly: HELPER_HOURLY, daily: HELPER_DAILY, anonHourly: HELPER_ANON_HOURLY, anonDaily: HELPER_ANON_DAILY, ipHourly: IP_AI_HOURLY * 3 });
+/** Menus, on top of the main allowance — see MENU_* above for why this route needs its own ceiling. */
+const menuQuota = meter(':menu', { hourly: MENU_HOURLY, daily: MENU_DAILY, anonHourly: MENU_ANON_HOURLY, anonDaily: MENU_ANON_DAILY });
 
 /** Plain per-IP request ceiling for everything, so a script can't hammer even cheap routes. */
 function ipLimit({ windowMs = 15 * 60 * 1000, max = IP_MAX_15M } = {}) {
@@ -154,4 +170,4 @@ function identityLimit({ windowMs = 15 * 60 * 1000, max = IDENTITY_MAX_15M } = {
   };
 }
 
-module.exports = { identify, aiQuota, helperQuota, ipLimit, identityLimit };
+module.exports = { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit };
