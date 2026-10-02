@@ -909,6 +909,16 @@ function coachSystemPrompt(profile = {}, targets = {}) {
     `- Never invent facts about them you were not given.`,
     `- Sound like a real coach, not a chatbot. No "great question", no fake enthusiasm.`,
     `- Plain text only. No markdown, no headers, no bullet symbols unless truly listing items.`,
+    // App Store guideline 1.4.1: medical and health information must carry citations. The app
+    // already links a Sources screen under every health reply; this makes the reply itself name
+    // where a claim comes from, so the citation is in the text the reviewer reads.
+    `- When you state a medical or health fact (a medication, a condition, a dose, a BMI cutoff,`,
+    `  a safe rate of weight change, a nutrient guideline), say in the same sentence which`,
+    `  organisation it comes from, by name, for example "the NHS says", "per the FDA label",`,
+    `  "the CDC's BMI ranges", "WHO guidance". Use only real, well known bodies: NHS, CDC, FDA,`,
+    `  WHO, NIH, Dietary Guidelines for Americans, ISSN. Never invent a study or a statistic.`,
+    `- Anything about prescription medication, a diagnosed condition, pregnancy or an eating`,
+    `  disorder ends with one short line telling them to confirm with their doctor.`,
   ].join('\n');
 }
 // Retry OpenAI chat on transient errors (429 rate-limit / 5xx server errors) with short backoff.
