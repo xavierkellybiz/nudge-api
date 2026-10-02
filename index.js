@@ -864,7 +864,7 @@ const TONE_MAP = {
   toughlove: 'Tough love. Firm, holds them accountable, no coddling.',
   bestie: 'Like a close friend. Casual, warm, a little playful.',
 };
-function coachSystemPrompt(profile = {}, targets = {}) {
+function coachSystemPrompt(profile = {}, targets = {}, health = '') {
   const p = profile || {}; const t = targets || {};
   const f = [];
   if (p.firstName) f.push(`Name: ${p.firstName}`);
@@ -894,6 +894,14 @@ function coachSystemPrompt(profile = {}, targets = {}) {
     `What you know about them:`,
     f.length ? f.map((x) => `- ${x}`).join('\n') : '- (limited info so far, ask if you need something)',
     ``,
+    // Apple Health, when they have connected it. Sent as finished sentences by the app (see
+    // healthForCoach in src/store/health.ts) rather than numbers, so the model has nothing to
+    // compute and nothing to round wrongly. Absent entirely for anyone not connected.
+    ...(health ? [
+      `From their Apple Health (a watch, ring, or their phone wrote these, so they are real):`,
+      `- ${health}`,
+      ``,
+    ] : []),
     `Rules (follow strictly):`,
     `- Answer the exact question they asked. Be specific, concrete, and genuinely useful.`,
     // "hi" used to get an abrupt demand for a photo, which reads as a machine, not a coach.
@@ -907,6 +915,13 @@ function coachSystemPrompt(profile = {}, targets = {}) {
     `- The brevity rule does not apply to a greeting: there, warmth IS the answer.`,
     `- NEVER use a dash of any kind: no hyphen, no en dash, no em dash. Rewrite with short sentences or commas.`,
     `- Never invent facts about them you were not given.`,
+    ...(health ? [
+      `- You may use their sleep, steps, training and heart rate above when it is relevant, and you`,
+      `  should: a short night or three hard sessions changes the advice. Mention it only when it`,
+      `  changes what you are telling them, never as a readout.`,
+      `- Never give medical advice about heart rate or sleep. You are a nutrition coach reading a`,
+      `  number they can already see, not diagnosing anything.`,
+    ] : []),
     `- Sound like a real coach, not a chatbot. No "great question", no fake enthusiasm.`,
     `- Plain text only. No markdown, no headers, no bullet symbols unless truly listing items.`,
     // App Store guideline 1.4.1: medical and health information must carry citations. The app
@@ -937,20 +952,71 @@ async function openaiChatWithRetry(body, tries = 3) {
   }
   return last;
 }
+
+// ── The coach's no-dash rule, in one place ───────────────────────────────────
+// The prompt forbids dashes, but models slip them in anyway, so the reply is scrubbed on the way
+// out. Both the JSON and the streaming path use this, or the two would drift.
+function scrubDashes(text) {
+  return String(text || '')
+    .replace(/\s+[—–]\s+/g, ', ')
+    .replace(/[—–]/g, ', ')
+    .replace(/(\S)\s-\s(\S)/g, '$1, $2');
+}
+
+/**
+ * The same scrub, applied to a stream.
+ *
+ * A dash pattern straddles chunks constantly — " protein" / " — rice" arrives as two deltas and
+ * neither holds the whole thing — so text is only released once nothing later can change it.
+ *
+ * The first attempt held back a fixed tail, which was not enough: it let the SPACE BEFORE a dash
+ * go out in an earlier chunk, so by the time the dash arrived the `\s+—\s+` rule had nothing on
+ * its left to match and the weaker `—` rule fired instead, leaving "protein ,  rice". The cut has
+ * to avoid landing anywhere near a dash, on either side of it.
+ *
+ * So the raw text is kept whole, the settled prefix is re-scrubbed each time, and only the part
+ * not yet sent is returned. Tracking the position in SCRUBBED space is what makes that safe:
+ * scrubbing changes lengths, so a raw offset would drift.
+ */
+const HOLD = 6;
+function makeDashScrubber() {
+  let raw = '';
+  let sent = 0;
+  /** How much of `raw` can never change again. */
+  const settled = () => {
+    let cut = raw.length - HOLD;
+    // Never cut within two characters of a dash: every rule needs both sides of one.
+    while (cut > 0 && /[—–-]/.test(raw.slice(Math.max(0, cut - 2), cut + 2))) cut--;
+    return cut > 0 ? cut : 0;
+  };
+  const flush = (upto) => {
+    const scrubbed = scrubDashes(raw.slice(0, upto));
+    const out = scrubbed.slice(sent);
+    sent = scrubbed.length;
+    return out;
+  };
+  return {
+    push(chunk) { raw += chunk; return flush(settled()); },
+    end() { return flush(raw.length); },
+  };
+}
+
 app.post('/coach', aiQuota, async (req, res) => {
   if (keyMissing(res)) return;
   try {
-    const { message, profile, targets, history, image } = req.body || {};
+    const { message, profile, targets, history, image, health, stream } = req.body || {};
+    const wantsStream = stream === true;
     if (!message) return res.status(400).json({ error: 'no message' });
     const hist = (Array.isArray(history) ? history : []).slice(-8)
       .map((m) => ({ role: m.role === 'coach' ? 'assistant' : 'user', content: String(m.text || '').slice(0, 800) }))
       .filter((m) => m.content);
     const r = await openaiChatWithRetry({
+      ...(wantsStream ? { stream: true } : {}),
       model: COACH_MODEL,
       temperature: 0.4,
       max_completion_tokens: 220,
       messages: [
-        { role: 'system', content: coachSystemPrompt(profile, targets) },
+        { role: 'system', content: coachSystemPrompt(profile, targets, typeof health === 'string' ? health.slice(0, 600) : '') },
         ...hist,
         // The Coach screen can attach a photo. Without passing it through, the upload is silently
         // dropped and the coach answers as though it never saw the picture.
@@ -969,12 +1035,57 @@ app.post('/coach', aiQuota, async (req, res) => {
       ],
     });
     if (!r.ok) return res.status(502).json({ error: `coach failed (${r.status})` });
+
+    // ── Streamed, when the client asked for it ───────────────────────────────
+    // Opt-in rather than the default on purpose: a build already in review talks to this endpoint
+    // and expects one JSON object back. Changing the shape under it would break the shipped app.
+    if (wantsStream) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      // Without this a proxy will happily buffer the whole response and hand it over in one piece,
+      // which is exactly the latency this exists to remove.
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+
+      const scrub = makeDashScrubber();
+      const send = (t) => { if (t) res.write(`data: ${JSON.stringify({ t })}\n\n`); };
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let aborted = false;
+      // Somebody leaving the screen should stop the generation, not pay for the rest of it.
+      req.on('close', () => { aborted = true; reader.cancel().catch(() => {}); });
+
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || aborted) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        // OpenAI replies in SSE too. A chunk can split a line, so anything after the last newline
+        // stays in the buffer until the rest of it turns up.
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const delta = JSON.parse(payload)?.choices?.[0]?.delta?.content;
+            if (delta) send(scrub.push(delta));
+          } catch { /* a keep-alive or a shape we don't read; nothing to emit */ }
+        }
+      }
+      if (!aborted) { send(scrub.end()); res.write('data: [DONE]\n\n'); }
+      return res.end();
+    }
+
     const data = await r.json();
-    // Safety net: scrub any dashes the model slipped in.
-    const reply = String(data?.choices?.[0]?.message?.content || '')
-      .replace(/\s+[—–]\s+/g, ', ').replace(/[—–]/g, ', ').replace(/(\S)\s-\s(\S)/g, '$1, $2').trim();
-    res.json({ reply });
+    res.json({ reply: scrubDashes(data?.choices?.[0]?.message?.content).trim() });
   } catch (e) {
+    // Past the headers there is no status left to set, so the stream is closed politely and the
+    // client falls back to what it has.
+    if (res.headersSent) { try { res.write('data: [DONE]\n\n'); res.end(); } catch {} return; }
     res.status(500).json({ error: 'coach error' });
   }
 });
@@ -1016,6 +1127,7 @@ app.post('/exercise', aiQuota, async (req, res) => {
     const kg = Number(profile?.currentWeightKg) > 0 ? Number(profile.currentWeightKg) : 70;
 
     const r = await openaiChatWithRetry({
+      ...(wantsStream ? { stream: true } : {}),
       model: COACH_MODEL,
       temperature: 0,
       max_completion_tokens: 160,
