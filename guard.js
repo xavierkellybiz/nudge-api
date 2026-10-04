@@ -170,4 +170,28 @@ function identityLimit({ windowMs = 15 * 60 * 1000, max = IDENTITY_MAX_15M } = {
   };
 }
 
-module.exports = { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit };
+/**
+ * The public demo's ceiling, for /ask on the marketing site.
+ *
+ * That route carries no shared secret — it cannot, because the website is a static bundle and
+ * anything in it is readable by anyone — so the IP is the only thing to meter. Its own key
+ * prefix, NOT ipall, so a visitor trying the demo does not spend the allowance of an app user
+ * behind the same NAT, and so abuse of the demo cannot lock real users out of the API.
+ *
+ * Tight on purpose: enough to try it a few times and be convinced, not enough to be worth
+ * pointing a script at. Tunable with ASK_LIMIT_HOUR.
+ */
+const ASK_MAX_HOUR = Number(process.env.ASK_LIMIT_HOUR || 12);
+function askLimit({ windowMs = 60 * 60 * 1000, max = ASK_MAX_HOUR } = {}) {
+  return (req, res, next) => {
+    const key = `ask:${clientIp(req)}`;
+    if (count(key, windowMs).length >= max) {
+      res.set('Retry-After', String(Math.ceil(windowMs / 1000)));
+      return res.status(429).json({ error: 'rate_limited' });
+    }
+    record(key);
+    next();
+  };
+}
+
+module.exports = { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit, askLimit };

@@ -18,7 +18,7 @@
 // Requires Node 18+ (global fetch / FormData / Blob).
 const express = require('express');
 const multer = require('multer');
-const { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit } = require('./guard');
+const { identify, aiQuota, helperQuota, menuQuota, ipLimit, identityLimit, askLimit } = require('./guard');
 
 const PORT = process.env.PORT || 8787;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -151,7 +151,9 @@ app.use(express.json({ limit: '25mb' }));
 app.use(ipLimit());
 // Shared-secret gate (only active when API_SECRET is set). /health stays open for uptime checks.
 app.use((req, res, next) => {
-  if (!API_SECRET || req.path === '/health') return next();
+  // /ask is the marketing site's demo. It cannot carry the secret — a static bundle has nowhere
+  // to hide one — so it is metered by IP instead (askLimit, below) and capped hard on length.
+  if (!API_SECRET || req.path === '/health' || req.path === '/ask') return next();
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   return res.status(401).json({ error: 'unauthorized' });
 });
@@ -1087,6 +1089,65 @@ app.post('/coach', aiQuota, async (req, res) => {
     // client falls back to what it has.
     if (res.headersSent) { try { res.write('data: [DONE]\n\n'); res.end(); } catch {} return; }
     res.status(500).json({ error: 'coach error' });
+  }
+});
+
+// ── /ask — the "ask the coach anything" box on joineasy.app ──────────────────
+//
+// A real answer from the real model, so somebody trying the site gets the product rather than a
+// lookup table of pre-written replies. Separate from /coach on purpose, and the differences are
+// all about it being unauthenticated:
+//
+//   · no shared secret (a static site cannot hold one), so askLimit meters by IP instead;
+//   · a short ceiling on both the question and the answer, which caps the cost of abuse far more
+//     effectively than any filter — there is no prompt worth stealing at 120 tokens out;
+//   · a prompt with no personal data in it at all. /coach is handed a profile, targets and Apple
+//     Health; this knows nothing about anybody, because the person asking is a stranger.
+//
+// Worth saying plainly: anyone can call this. The protection is that it is cheap, short, rate
+// limited and narrow, not that it is hidden.
+app.post('/ask', askLimit(), async (req, res) => {
+  if (keyMissing(res)) return;
+  try {
+    const raw = String((req.body || {}).question || '').trim();
+    if (!raw) return res.status(400).json({ error: 'no question' });
+    const question = raw.slice(0, 300);
+
+    const r = await openaiChatWithRetry({
+      model: COACH_MODEL,
+      temperature: 0.4,
+      max_completion_tokens: 130,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are the coach inside Easy, a fat loss app, answering a stranger trying the website.',
+            'You know nothing about them: no weight, no targets, no food log. Never pretend otherwise.',
+            '',
+            'Rules:',
+            '- Two or three sentences. Never more.',
+            '- Answer the actual question, concretely. Give a number when one is genuinely useful.',
+            '- If it depends on something you have not been told, say what it depends on in a few',
+            '  words and give your best general answer anyway. Never reply with only a question.',
+            '- Food, nutrition, training, sleep and weight only. Anything else, say that is not',
+            '  what you are for and name something you could help with instead. One line.',
+            '- Medical, medication, BMI or health-condition questions: you MUST name the body the',
+            '  figure comes from inside the sentence ("the CDC puts", "the NHS says"), and you MUST',
+            '  end with one short line telling them to check with their doctor. Both, every time.',
+            '- NEVER use a dash of any kind. Short sentences or commas instead.',
+            '- Plain text. No markdown, no lists, no sign off, no "great question".',
+          ].join('\n'),
+        },
+        { role: 'user', content: question },
+      ],
+    });
+    if (!r.ok) return res.status(502).json({ error: `ask failed (${r.status})` });
+    const data = await r.json();
+    const answer = scrubDashes(data?.choices?.[0]?.message?.content).trim();
+    if (!answer) return res.status(502).json({ error: 'empty' });
+    res.json({ answer });
+  } catch {
+    res.status(500).json({ error: 'ask error' });
   }
 });
 
